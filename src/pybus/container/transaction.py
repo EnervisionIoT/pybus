@@ -7,8 +7,8 @@ from types import TracebackType, UnionType
 from typing import Any, final, get_args, get_origin, overload
 from uuid import UUID
 
+from confluent_kafka.aio import AIOProducer
 from dependency_injector import containers, providers
-from kafka import KafkaProducer
 
 from pybus.application.commands import Command
 from pybus.application.common.pagination import PaginationQuery
@@ -19,9 +19,7 @@ from pybus.infrastructure.database.session import DataBaseSession
 
 class TransactionContainer(containers.DeclarativeContainer):
     correlation_id: providers.Provider[UUID] = providers.Object(uuid.uuid4())
-    kafka_producer: providers.Provider[KafkaProducer] = providers.Dependency(
-        instance_of=KafkaProducer
-    )
+    kafka_producer: providers.Provider[AIOProducer] = providers.Dependency(instance_of=AIOProducer)
     session: providers.Provider[DataBaseSession] = providers.Dependency(instance_of=DataBaseSession)
     logger: providers.Provider[Logger] = providers.Dependency(instance_of=Logger)
 
@@ -286,11 +284,11 @@ class TransactionContext:
             raise
 
     async def publish_event(self, message: DomainEvent) -> None:
-        kafka_producer = self.get_dependency(KafkaProducer)
+        kafka_producer = self.get_dependency(AIOProducer)
         correlation_id = self.get_dependency(UUID)
 
         message.correlation_id = correlation_id
-        kafka_producer.send(
+        await kafka_producer.produce(
             topic=self.DOMAIN_EVENTS_TOPIC,
             value=message.model_dump_json().encode("utf-8"),
             key=str(message.aggregate_id).encode("utf-8"),

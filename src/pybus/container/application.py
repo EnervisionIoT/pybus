@@ -2,8 +2,8 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, overload
 
+from confluent_kafka.aio import AIOProducer
 from dependency_injector import containers, providers
-from kafka import KafkaProducer
 from sqlalchemy import create_engine
 
 from pybus.application import ApplicationModule
@@ -30,11 +30,11 @@ def create_application(
         application.include_module(module)
 
     @application.on_enter_transaction_context
-    async def on_enter_transaction_context(context: TransactionContext) -> None:
+    async def on_enter_transaction_context(context: TransactionContext) -> None:  # pyright: ignore[reportUnusedFunction]
         context.set_dependency("publish_event", context.publish_event)
 
     @application.on_exit_transaction_context
-    async def on_exit_transaction_context(
+    async def on_exit_transaction_context(  # pyright: ignore[reportUnusedFunction]
         context: TransactionContext, exc_val: BaseException | None
     ) -> None:
         session = context.get_dependency(DataBaseSession)
@@ -45,7 +45,7 @@ def create_application(
         session.close()
 
     @application.transaction_middleware
-    async def event_collector_middleware(
+    async def event_collector_middleware(  # pyright: ignore[reportUnusedFunction]
         context: TransactionContext, call_next: Callable[[], Awaitable[Any]]
     ) -> Any:
         result = await call_next()
@@ -93,8 +93,8 @@ class ApplicationContainer(containers.DeclarativeContainer):
         ),
     )
 
-    kafka_producer: providers.Provider[KafkaProducer] = providers.Singleton(
-        KafkaProducer,
+    kafka_producer: providers.Provider[AIOProducer] = providers.Singleton(
+        AIOProducer,
         bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS,
     )
 
