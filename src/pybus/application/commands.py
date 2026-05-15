@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, Field, computed_field
 
 
-class Command[TResult: Any](BaseModel):
+class Command[TResult: Any = None](BaseModel):
     _registry: ClassVar[dict[str, type["Command[Any]"]]] = {}
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
