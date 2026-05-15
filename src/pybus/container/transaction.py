@@ -88,7 +88,7 @@ class TransactionContext:
         ] = []
         self._handlers_iterator: (
             Callable[
-                [Command | Query[Any] | DomainEvent],
+                [Command[Any] | Query[Any] | DomainEvent],
                 Generator[Callable[..., Awaitable[Any]], None, None],
             ]
             | None
@@ -97,7 +97,7 @@ class TransactionContext:
     def configure(
         self,
         handlers_iterator: Callable[
-            [Command | Query[Any] | DomainEvent],
+            [Command[Any] | Query[Any] | DomainEvent],
             Generator[Callable[..., Awaitable[Any]], None, None],
         ],
         on_enter_transaction_context: Callable[["TransactionContext"], Awaitable[None]]
@@ -146,7 +146,7 @@ class TransactionContext:
         handler: Callable[..., Awaitable[TResult]]
         | Callable[..., Awaitable[tuple[int, TResult]]]
         | Callable[..., Awaitable[None]],
-        message: Command | Query[TResult] | DomainEvent,
+        message: Command[TResult] | Query[TResult] | DomainEvent,
         pagination: PaginationQuery | None = None,
     ) -> dict[str, object]:
         sinature = inspect.signature(handler)
@@ -180,10 +180,10 @@ class TransactionContext:
         return parameters
 
     @overload
-    async def call(
+    async def call[TResult](
         self,
-        handler: Callable[..., Awaitable[None]],
-        message: Command,
+        handler: Callable[..., Awaitable[TResult]],
+        message: Command[TResult],
         pagination: None = None,
     ) -> None: ...
 
@@ -216,7 +216,7 @@ class TransactionContext:
         handler: Callable[..., Awaitable[None]]
         | Callable[..., Awaitable[TResult]]
         | Callable[..., Awaitable[tuple[int, TResult]]],
-        message: Command | Query[TResult] | DomainEvent,
+        message: Command[TResult] | Query[TResult] | DomainEvent,
         pagination: PaginationQuery | None = None,
     ) -> TResult | tuple[int, TResult] | None:
         parameters = await self._resolve_parameters(handler, message, pagination)
@@ -228,7 +228,7 @@ class TransactionContext:
 
         return await call_next()
 
-    async def execute_command(self, command: Command) -> None:
+    async def execute_command[TResult](self, command: Command[TResult]) -> None:
         if self._handlers_iterator is None:
             raise RuntimeError("Handlers iterator is not configured")
 

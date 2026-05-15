@@ -1,6 +1,7 @@
 import logging
 import os
 from logging.config import dictConfig
+from typing import Any
 
 
 class LoggerFactory:
@@ -20,7 +21,7 @@ class LoggerFactory:
     def create_logger(cls) -> logging.Logger:
         if not cls._configured:
             cls.configure()
-        logging_config = {
+        logging_config: dict[str, Any] = {
             "version": 1,
             "disable_existing_loggers": False,
             "formatters": {

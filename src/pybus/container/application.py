@@ -125,7 +125,9 @@ class Application(ApplicationModule):
         ] = []
 
     @overload
-    async def execute(self, message: Command, pagination: None = None) -> None: ...
+    async def execute[TResult](
+        self, message: Command[TResult], pagination: None = None
+    ) -> TResult: ...
 
     @overload
     async def execute[TResult](
@@ -142,7 +144,7 @@ class Application(ApplicationModule):
 
     async def execute[TResult](
         self,
-        message: Command | Query[TResult] | DomainEvent,
+        message: Command[TResult] | Query[TResult] | DomainEvent,
         pagination: PaginationQuery | None = None,
     ) -> TResult | tuple[int, TResult] | None:
         async with self.transaction_context() as ctx:

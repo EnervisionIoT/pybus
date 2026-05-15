@@ -12,7 +12,7 @@ class ApplicationModule:
     def __init__(self, name: str):
         self.name: str = name
         self._handlers: dict[
-            type[Command | DomainEvent | Query[Any]],
+            type[Command[Any] | DomainEvent | Query[Any]],
             set[Callable[..., Awaitable[None] | Awaitable[Any]]],
         ] = defaultdict(set)
         self._sub_modules: set["ApplicationModule"] = set()
@@ -23,7 +23,9 @@ class ApplicationModule:
     def include_module(self, module: "ApplicationModule"):
         self._sub_modules.add(module)
 
-    def register_handler[TResult](self, message_type: type[Command | DomainEvent | Query[TResult]]):
+    def register_handler[TResult](
+        self, message_type: type[Command[TResult] | DomainEvent | Query[TResult]]
+    ):
         def decorator(
             func: Callable[..., Awaitable[None] | Awaitable[TResult]],
         ):
@@ -33,8 +35,8 @@ class ApplicationModule:
         return decorator
 
     @overload
-    def _iterate_handlers(
-        self, message: Command
+    def _iterate_handlers[TResult](
+        self, message: Command[TResult]
     ) -> Generator[Callable[..., Awaitable[None]], None, None]: ...
 
     @overload
@@ -48,7 +50,7 @@ class ApplicationModule:
     ) -> Generator[Callable[..., Awaitable[None]], None, None]: ...
 
     def _iterate_handlers[TResult](
-        self, message: Command | Query[TResult] | DomainEvent
+        self, message: Command[TResult] | Query[TResult] | DomainEvent
     ) -> Generator[
         Callable[..., Awaitable[None]] | Callable[..., Awaitable[TResult]],
         None,
@@ -61,7 +63,7 @@ class ApplicationModule:
             yield from sub_module._iterate_handlers(message)
 
     def get_handlers[TResult](
-        self, message: Command | DomainEvent | Query[TResult]
+        self, message: Command[TResult] | DomainEvent | Query[TResult]
     ) -> Generator[Callable[..., Awaitable[None]] | Callable[..., Awaitable[TResult]], None, None]:
         return self._iterate_handlers(message)
 

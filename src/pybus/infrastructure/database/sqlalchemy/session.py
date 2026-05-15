@@ -12,7 +12,7 @@ from .base import Base
 def before_create(target: SchemaItem, connection: Connection, **kw: object):
     if connection.dialect.name == "postgresql":
         pg_trgm_ddl = DDL("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        _ = connection.execute(pg_trgm_ddl)
+        connection.execute(pg_trgm_ddl)
 
 
 class SqlAlchemySession(DataBaseSession):

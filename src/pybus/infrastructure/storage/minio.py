@@ -47,7 +47,7 @@ class Minio(Storage):
     def check_file_exists(self, bucket: str, file_path: str) -> bool:
         self.__check_bucket_exists(bucket=bucket)
         try:
-            _ = self._client.stat_object(bucket_name=bucket, object_name=file_path)
+            self._client.stat_object(bucket_name=bucket, object_name=file_path)
             return True
         except Exception:
             return False
@@ -75,7 +75,7 @@ class Minio(Storage):
         if not self._client.bucket_exists(bucket_name=bucket):
             self._client.make_bucket(bucket_name=bucket)
 
-        _ = self._client.put_object(
+        self._client.put_object(
             bucket_name=bucket,
             object_name=object_name,
             data=io.BytesIO(file.to_bytes()),

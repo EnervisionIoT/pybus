@@ -15,7 +15,7 @@ class Entity(BaseModel):
 
 
 class AggregateRoot(Entity, BusinessRuleValidationMixin, ABC):
-    _events: list["DomainEvent"] = PrivateAttr(default_factory=list)
+    _events: list["DomainEvent"] = PrivateAttr(default_factory=list["DomainEvent"])
 
     def register_event(self, event: "DomainEvent"):
         self._events.append(event)

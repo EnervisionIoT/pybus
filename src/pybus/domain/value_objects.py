@@ -33,14 +33,14 @@ class FileObject(ValueObject):
 
     @model_validator(mode="after")
     def compute_and_validate_size(self) -> "FileObject":
-        _ = self.stream.seek(0, 2)
+        self.stream.seek(0, 2)
         size = self.stream.tell()
-        _ = self.stream.seek(0)
+        self.stream.seek(0)
         if size > 2 * 1024 * 1024:
             raise ValueError("File size exceeds the maximum limit of 2MB")
         object.__setattr__(self, "size", size)
         return self
 
     def to_bytes(self) -> bytes:
-        _ = self.stream.seek(0)
+        self.stream.seek(0)
         return self.stream.read()

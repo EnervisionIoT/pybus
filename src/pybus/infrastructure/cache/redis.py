@@ -31,13 +31,13 @@ class RedisCache(Cache):
     @override
     def get_set(self, key: str) -> set[str]:
         with self._client as client:
-            result = cast(set[str], client.smembers(key))
+            result = cast(set[str], client.smembers(key))  # type: ignore
             return result
 
     @override
     def add_to_set(self, key: str, *values: str) -> None:
         with self._client as client:
-            _ = client.sadd(key, *values)
+            client.sadd(key, *values)
 
     @override
     def increment(self, key: str) -> int:
@@ -47,13 +47,13 @@ class RedisCache(Cache):
     @override
     def expire(self, key: str, expire: int) -> None:
         with self._client as client:
-            _ = client.expire(key, expire)
+            client.expire(key, expire)
 
     @override
     def delete(self, key: str) -> None:
         with self._client as client:
-            _ = client.delete(key)
+            client.delete(key)
 
     def flushall(self) -> None:
         with self._client as client:
-            _ = client.flushall()
+            client.flushall()  # type: ignore
