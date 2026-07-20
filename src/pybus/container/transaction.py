@@ -31,7 +31,7 @@ class DependencyProvider:
     def resolve_provider_by_type(self, cls: type) -> providers.Provider[Any]:
         def inspect_provider(provider: providers.Provider[Any]) -> bool:
             if isinstance(provider, (providers.Factory, providers.Singleton)):
-                return issubclass(provider.cls, cls)
+                return inspect.isclass(provider.cls) and issubclass(provider.cls, cls)
             elif isinstance(provider, providers.Dependency):
                 return issubclass(provider.instance_of, cls)
 

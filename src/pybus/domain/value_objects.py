@@ -1,4 +1,5 @@
-from typing import Any, BinaryIO, ClassVar
+import io
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 
@@ -27,7 +28,7 @@ class FileObject(ValueObject):
     filename: str
     content_type: str
     size: int
-    stream: BinaryIO
+    stream: io.IOBase
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 

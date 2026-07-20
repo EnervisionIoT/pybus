@@ -28,12 +28,18 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.22.1",
     "coverage>=7.13.5",
     "pre-commit>=4.5.1",
     "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.15.9",
     "ty>=0.0.30",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
