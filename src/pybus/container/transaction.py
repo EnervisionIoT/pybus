@@ -18,7 +18,7 @@ from pybus.infrastructure.database.session import DataBaseSession
 
 
 class TransactionContainer(containers.DeclarativeContainer):
-    correlation_id: providers.Provider[UUID] = providers.Object(uuid.uuid4())
+    correlation_id: providers.Provider[UUID] = providers.Singleton(uuid.uuid4)
     kafka_producer: providers.Provider[AIOProducer] = providers.Dependency(instance_of=AIOProducer)
     session: providers.Provider[DataBaseSession] = providers.Dependency(instance_of=DataBaseSession)
     logger: providers.Provider[Logger] = providers.Dependency(instance_of=Logger)
@@ -45,12 +45,6 @@ class DependencyProvider:
                 )
             return matching_providers[0][1]
         raise ValueError(f"Cannot resolve {cls}")
-
-    def has_dependency[TDependency](self, identifier: type[TDependency] | str) -> bool:
-        if isinstance(identifier, str):
-            return identifier in self._container.providers
-        else:
-            return bool(self.resolve_provider_by_type(identifier))
 
     def register_dependency[TDependency](
         self, identifier: type[TDependency] | str, value: TDependency
@@ -118,9 +112,6 @@ class TransactionContext:
         self._on_exit_transaction_context = on_exit_transaction_context
         self._middlewares = middlewares or []
 
-    def has_dependency[TDependency](self, identifier: type[TDependency] | str) -> bool:
-        return self._dependency_provider.has_dependency(identifier)
-
     def get_dependency[TDependency](self, identifier: type[TDependency] | str) -> TDependency:
         return self._dependency_provider.get_dependency(identifier)
 
@@ -169,13 +160,11 @@ class TransactionContext:
                 parameters[name] = message
                 continue
 
-            if isinstance(annotation, type) and self.has_dependency(annotation):
+            if isinstance(annotation, type):
                 parameters[name] = self.get_dependency(annotation)
                 continue
 
-            if self.has_dependency(name):
-                parameters[name] = self.get_dependency(name)
-                continue
+            parameters[name] = self.get_dependency(name)
 
         return parameters
 
@@ -240,6 +229,8 @@ class TransactionContext:
                 f"Executing command {command} failed with error: {ex}"
             )
             raise
+
+        raise Exception(f"No handler found for command: {command}")
 
     @overload
     async def execute_query[TResult](

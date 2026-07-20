@@ -7,11 +7,11 @@ class DataBaseSession(Protocol):
     @property
     def connection(self) -> Any: ...
 
-    def commit(self) -> None: ...
+    async def commit(self) -> None: ...
 
-    def rollback(self) -> None: ...
+    async def rollback(self) -> None: ...
 
-    def close(self) -> None: ...
+    async def close(self) -> None: ...
 
     async def __aenter__(self) -> Self:
         return self
@@ -23,7 +23,7 @@ class DataBaseSession(Protocol):
         exc_tb: TracebackType | None,
     ) -> None:
         if exc_type is None:
-            self.commit()
+            await self.commit()
         else:
-            self.rollback()
-        self.close()
+            await self.rollback()
+        await self.close()

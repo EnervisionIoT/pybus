@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from ..value_objects import FileObject
+from ...domain.value_objects import FileObject
 
 
 class Storage(ABC):

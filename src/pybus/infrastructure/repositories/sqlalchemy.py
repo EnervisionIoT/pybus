@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import overload, override
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
 from pybus.domain.entities import AggregateRoot
@@ -38,10 +38,11 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     def _default_stmt(self) -> Select[tuple[TModel]]:
         return select(self.orm_model)
 
-    def __init__(self, session: Session, correlation_id: uuid.UUID):
-        self._session: Session = session
+    def __init__(self, session: AsyncSession, correlation_id: uuid.UUID):
+        self._session: AsyncSession = session
         self._correlation_id: uuid.UUID = correlation_id
         self._identity_map: dict[uuid.UUID, TEntity | Removed] = dict()
+        self._added_ids: set[uuid.UUID] = set()
 
     async def _paginate(
         self, stmt: Select[tuple[TModel]], page: int = 1, size: int = 10
@@ -49,8 +50,8 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         total_stmt = select(func.count()).select_from(stmt.subquery())
         items_stmt = stmt.offset((page - 1) * size).limit(size)
 
-        total = self._session.scalar(total_stmt) or 0
-        items = list(self._session.scalars(items_stmt).unique().all())
+        total = await self._session.scalar(total_stmt) or 0
+        items = list((await self._session.scalars(items_stmt)).unique().all())
         return total, items
 
     @override
@@ -58,7 +59,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         stmt = self._default_stmt.where(getattr(self.orm_model, "id") == entity_id)
         if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
-        instance = self._session.scalar(stmt)
+        instance = await self._session.scalar(stmt)
         return await self._get_entity(instance) if instance else None
 
     @override
@@ -68,7 +69,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         stmt = self._default_stmt.where(getattr(self.orm_model, "id").in_(entity_ids))
         if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
-        instances = self._session.scalars(stmt).all()
+        instances = (await self._session.scalars(stmt)).all()
         return [await self._get_entity(instance) for instance in instances]
 
     @overload
@@ -92,7 +93,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
             total, instances = await self._paginate(stmt, page or 1, size or 10)
             return total, [await self._get_entity(instance) for instance in instances]
 
-        instances = self._session.scalars(stmt).all()
+        instances = (await self._session.scalars(stmt)).all()
         return [await self._get_entity(instance) for instance in instances]
 
     @override
@@ -100,7 +101,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         stmt = select(DomainEventModel).where(
             DomainEventModel.aggregate_id == entity_id, DomainEventModel.version > 0
         )
-        instances = self._session.scalars(stmt).all()
+        instances = (await self._session.scalars(stmt)).all()
         return [
             DomainEvent.deserialize(
                 {
@@ -108,7 +109,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
                     "correlation_id": instance.correlation_id,
                     "aggregate_id": instance.aggregate_id,
                     "aggregate_type": instance.aggregate_type,
-                    "event_type": instance.event_type,
+                    "message_type": instance.message_type,
                     "occurred_on": instance.occurred_on,
                     "version": instance.version,
                     "created_by_id": instance.created_by_id,
@@ -121,6 +122,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     @override
     async def add(self, entity: TEntity):
         self._identity_map[entity.id] = entity
+        self._added_ids.add(entity.id)
         instance = await self._entity_to_model(entity)
         self._session.add(instance)
 
@@ -137,13 +139,14 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
             )
 
         instance = await self._entity_to_model(entity)
-        self._session.merge(instance)
+        await self._session.merge(instance)
 
     @override
     async def persist_all(self):
-        for entity in self._identity_map.values():
-            if not isinstance(entity, Removed):
+        for entity_id, entity in self._identity_map.items():
+            if not isinstance(entity, Removed) and entity_id not in self._added_ids:
                 await self.persist(entity)
+        self._added_ids.clear()
 
     @override
     async def collect_events(self) -> list[DomainEvent]:
@@ -163,8 +166,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
                 )
             self._identity_map[entity.id] = REMOVED
 
-        stmt = select(self.orm_model).where(getattr(self.orm_model, "id") == entity.id)
-        instance = self._session.scalar(stmt)
+        instance = await self._session.get(self.orm_model, entity.id)
         if not instance:
             raise EntityNotFoundException(
                 repository_name=self.__class__.__name__, entity_id=entity.id
@@ -172,9 +174,9 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
 
         if isinstance(instance, SoftDeleteMixin):
             instance.deleted_at = datetime.now()
-            self._session.merge(instance)
+            await self._session.merge(instance)
         else:
-            self._session.delete(instance)
+            await self._session.delete(instance)
 
     @override
     async def restore(self, entity: TEntity):
@@ -188,7 +190,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
             raise SoftDeleteException(repository_name=self.__class__.__name__, entity_id=entity.id)
 
         instance.deleted_at = None
-        instance = self._session.merge(instance)
+        instance = await self._session.merge(instance)
         self._identity_map[entity.id] = await self._model_to_entity(instance)
 
     @override
@@ -201,7 +203,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
                     correlation_id=self._correlation_id,
                     aggregate_id=domain_event.aggregate_id,
                     aggregate_type=domain_event.aggregate_type,
-                    event_type=domain_event.event_type,
+                    message_type=domain_event.message_type,
                     occurred_on=domain_event.occurred_on,
                     version=domain_event.version,
                     created_by_id=domain_event.created_by_id,

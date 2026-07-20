@@ -21,8 +21,7 @@ class AggregateRoot(Entity, BusinessRuleValidationMixin, ABC):
         self._events.append(event)
 
     def collect_events(self) -> list["DomainEvent"]:
-        events = self._events[:]
-        self._events.clear()
+        events, self._events = self._events, []
         return events
 
 
@@ -31,8 +30,7 @@ class EventSourced(AggregateRoot):
 
     @classmethod
     def rebuild(cls, events: list["DomainEvent"]) -> Self:
-        self = object.__new__(cls)
-        cls.__init__(self)
+        self = cls.model_construct()
         self.load(events)
         return self
 

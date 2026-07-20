@@ -3,7 +3,7 @@ from typing import override
 from google import genai
 from google.genai.types import EmbedContentConfig
 
-from pybus.domain.interfaces import Embedder
+from pybus.application.interfaces import Embedder
 
 
 class GenAI(Embedder):

@@ -1,13 +1,13 @@
 import uuid
-from typing import Any, ClassVar
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import Field
+
+from .mixins import TypeRegistryMixin
 
 
-class DomainEvent(BaseModel):
-    _registry: ClassVar[dict[str, type["DomainEvent"]]] = {}
-
+class DomainEvent(TypeRegistryMixin):
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     correlation_id: uuid.UUID | None = Field(default=None, description="執行 ID")
     aggregate_id: uuid.UUID = Field(description="聚合根 ID")
@@ -15,20 +15,6 @@ class DomainEvent(BaseModel):
     occurred_on: datetime = Field(default_factory=datetime.now, description="事件發生時間")
     version: int | None = Field(default=None, description="事件版本")
     created_by_id: uuid.UUID | None = Field(default=None, description="創建者 ID")
-
-    @computed_field
-    @property
-    def event_type(self) -> str:
-        return self.__class__.__name__
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        cls._registry[cls.__name__] = cls
-
-    @classmethod
-    def deserialize(cls, data: dict[str, Any]) -> "DomainEvent":
-        target_cls = cls._registry.get(data["event_type"], cls)
-        return target_cls.model_validate(data)
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -38,7 +24,7 @@ class DomainEvent(BaseModel):
                 "correlation_id",
                 "aggregate_id",
                 "aggregate_type",
-                "event_type",
+                "message_type",
                 "occurred_on",
                 "version",
                 "created_by_id",

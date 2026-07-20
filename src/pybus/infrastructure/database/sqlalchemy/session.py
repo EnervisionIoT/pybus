@@ -1,7 +1,7 @@
 from typing import override
 
-from sqlalchemy import DDL, Connection, Engine, event
-from sqlalchemy.orm import Session
+from sqlalchemy import DDL, Connection, event
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.schema import SchemaItem
 
 from ..session import DataBaseSession
@@ -16,23 +16,23 @@ def before_create(target: SchemaItem, connection: Connection, **kw: object):
 
 
 class SqlAlchemySession(DataBaseSession):
-    def __init__(self, engine: Engine) -> None:
-        self._engine: Engine = engine
-        self._session: Session = Session(self._engine, expire_on_commit=False)
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine: AsyncEngine = engine
+        self._session: AsyncSession = AsyncSession(self._engine, expire_on_commit=False)
 
     @property
     @override
-    def connection(self) -> Session:
+    def connection(self) -> AsyncSession:
         return self._session
 
     @override
-    def commit(self) -> None:
-        self._session.commit()
+    async def commit(self) -> None:
+        await self._session.commit()
 
     @override
-    def rollback(self) -> None:
-        self._session.rollback()
+    async def rollback(self) -> None:
+        await self._session.rollback()
 
     @override
-    def close(self) -> None:
-        self._session.close()
+    async def close(self) -> None:
+        await self._session.close()

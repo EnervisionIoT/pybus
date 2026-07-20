@@ -4,7 +4,7 @@ from typing import Any, overload
 
 from confluent_kafka.aio import AIOProducer
 from dependency_injector import containers, providers
-from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from pybus.application import ApplicationModule
 from pybus.application.commands import Command
@@ -39,10 +39,10 @@ def create_application(
     ) -> None:
         session = context.get_dependency(DataBaseSession)
         if exc_val:
-            session.rollback()
+            await session.rollback()
         else:
-            session.commit()
-        session.close()
+            await session.commit()
+        await session.close()
 
     @application.transaction_middleware
     async def event_collector_middleware(  # pyright: ignore[reportUnusedFunction]
@@ -89,7 +89,10 @@ class ApplicationContainer(containers.DeclarativeContainer):
         config.provided.DATABASE_TYPE,
         sqlalchemy=providers.Factory(
             SqlAlchemySession,
-            engine=providers.Singleton(create_engine, url=config.provided.DATABASE_URL),
+            engine=providers.Singleton(
+                create_async_engine,
+                url=providers.Callable(str, config.provided.SQLALCHEMY_DATABASE_URI),
+            ),
         ),
     )
 

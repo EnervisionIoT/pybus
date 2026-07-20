@@ -6,9 +6,10 @@ from typing import override
 
 from minio import Minio as MinioClient
 from minio.commonconfig import ENABLED, Filter
+from minio.error import S3Error
 from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
 
-from pybus.domain.interfaces import Storage
+from pybus.application.interfaces import Storage
 from pybus.domain.value_objects import FileObject
 
 
@@ -54,10 +55,13 @@ class Minio(Storage):
 
     @override
     def get_file(self, bucket: str, file_path: str) -> FileObject:
-        if not self.check_file_exists(bucket=bucket, file_path=file_path):
-            raise Exception("File not found")
+        try:
+            response = self._client.get_object(bucket_name=bucket, object_name=file_path)
+        except S3Error as ex:
+            if ex.code in ("NoSuchKey", "NoSuchBucket"):
+                raise Exception("File not found") from ex
+            raise
 
-        response = self._client.get_object(bucket_name=bucket, object_name=file_path)
         content = response.read()  # 小檔案可直接一次讀
         response.close()
         response.release_conn()
@@ -75,10 +79,11 @@ class Minio(Storage):
         if not self._client.bucket_exists(bucket_name=bucket):
             self._client.make_bucket(bucket_name=bucket)
 
+        file.stream.seek(0)
         self._client.put_object(
             bucket_name=bucket,
             object_name=object_name,
-            data=io.BytesIO(file.to_bytes()),
+            data=file.stream,
             length=file.size,
             content_type=file.content_type,
         )

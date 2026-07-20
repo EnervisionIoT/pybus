@@ -1,4 +1,4 @@
-from typing import override, final
+from typing import final, override
 
 from .rules import BusinessRule
 
@@ -7,8 +7,8 @@ class DomainException(Exception):
     message: str
 
     def __init__(self, message: str):
-        super().__init__()
         self.message = message
+        super().__init__(self.message)
 
 
 @final
@@ -17,7 +17,7 @@ class BusinessRuleValidationException(DomainException):
 
     def __init__(self, rule: BusinessRule):
         self.rule = rule
-        self.message = f"Business rule violated: {str(rule)}"
+        self.message = f"Business rule violated: {self.rule.get_message()}"
         super().__init__(self.message)
 
     @override

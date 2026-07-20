@@ -6,6 +6,7 @@ from typing import Any
 
 class LoggerFactory:
     _configured: bool = False
+    _logger: logging.Logger | None = None
 
     @classmethod
     def configure(cls, logger_name: str = "pybus", log_relative_path: str = "logs/pybus.log"):
@@ -19,6 +20,9 @@ class LoggerFactory:
 
     @classmethod
     def create_logger(cls) -> logging.Logger:
+        if cls._logger is not None:
+            return cls._logger
+
         if not cls._configured:
             cls.configure()
         logging_config: dict[str, Any] = {
@@ -69,4 +73,5 @@ class LoggerFactory:
             },
         }
         dictConfig(logging_config)
-        return logging.getLogger(cls.logger_name)
+        cls._logger = logging.getLogger(cls.logger_name)
+        return cls._logger
