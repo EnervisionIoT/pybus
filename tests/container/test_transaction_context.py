@@ -311,10 +311,10 @@ async def test_publish_event_produces_to_kafka_with_correlation_id_set():
     fake_producer.produce = AsyncMock()
 
     class C(containers.DeclarativeContainer):
-        correlation_id_dep = providers.Dependency(instance_of=uuid.UUID)
+        correlation_id = providers.Dependency(instance_of=uuid.UUID)
         kafka_producer_dep = providers.Dependency(instance_of=AIOProducer)
 
-    container = C(correlation_id_dep=correlation_id, kafka_producer_dep=fake_producer)
+    container = C(correlation_id=correlation_id, kafka_producer_dep=fake_producer)
     ctx = make_context(container)
 
     event = make_dummy_event()

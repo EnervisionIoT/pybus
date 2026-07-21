@@ -1,6 +1,7 @@
+import uuid
 from typing import override
 
-from sqlalchemy import DDL, Connection, event
+from sqlalchemy import DDL, Connection, event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.schema import SchemaItem
 
@@ -36,3 +37,13 @@ class SqlAlchemySession(DataBaseSession):
     @override
     async def close(self) -> None:
         await self._session.close()
+
+    @override
+    async def set_tenant_context(self, tenant_id: uuid.UUID):
+        await self._session.execute(
+            text("SET LOCAL app.tenant_id = :tenant_id"), {"tenant_id": str(tenant_id)}
+        )
+
+    @override
+    async def set_platform_context(self):
+        await self._session.execute(text("SET LOCAL app.is_platform = 'true'"))

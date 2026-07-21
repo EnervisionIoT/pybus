@@ -2,13 +2,13 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, overload
 
-from .entities import Entity
+from .entities import AggregateRoot
 
 if TYPE_CHECKING:
     from .events import DomainEvent
 
 
-class GenericRepository[TEntity: Entity](ABC):
+class GenericRepository[TEntity: AggregateRoot](ABC):
     """An interface for a generic repository"""
 
     @abstractmethod

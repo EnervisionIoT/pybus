@@ -1,3 +1,4 @@
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,6 +16,8 @@ def engine():
 def test_sqlalchemy_session_satisfies_database_session_protocol(engine):
     session = SqlAlchemySession(engine)
     assert isinstance(session, DataBaseSession)
+    assert hasattr(session, "set_tenant_context")
+    assert hasattr(session, "set_platform_context")
 
 
 def test_connection_property_returns_the_underlying_async_session(engine):
@@ -79,3 +82,31 @@ async def test_aexit_rolls_back_on_exception_and_always_closes(engine):
     session.rollback.assert_awaited_once()
     session.commit.assert_not_called()
     session.close.assert_awaited_once()
+
+
+async def test_set_tenant_context_delegates_to_underlying_async_session(engine):
+    session = SqlAlchemySession(engine)
+    session._session.execute = AsyncMock()
+    tenant_id = uuid.uuid4()
+
+    await session.set_tenant_context(tenant_id)
+
+    session._session.execute.assert_awaited_once()
+    args, kwargs = session._session.execute.call_args
+    statement = args[0]
+    assert statement.text == "SET LOCAL app.tenant_id = :tenant_id"
+    params = args[1] if len(args) > 1 else kwargs.get("parameters")
+    assert params == {"tenant_id": str(tenant_id)}
+
+
+async def test_set_platform_context_delegates_to_underlying_async_session(engine):
+    session = SqlAlchemySession(engine)
+    session._session.execute = AsyncMock()
+
+    await session.set_platform_context()
+
+    session._session.execute.assert_awaited_once()
+    args, _kwargs = session._session.execute.call_args
+    statement = args[0]
+    assert statement.text == "SET LOCAL app.is_platform = 'true'"
+    assert len(args) == 1

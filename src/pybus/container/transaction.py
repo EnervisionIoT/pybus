@@ -276,7 +276,7 @@ class TransactionContext:
 
     async def publish_event(self, message: DomainEvent) -> None:
         kafka_producer = self.get_dependency(AIOProducer)
-        correlation_id = self.get_dependency(UUID)
+        correlation_id: uuid.UUID = self.get_dependency("correlation_id")
 
         message.correlation_id = correlation_id
         await kafka_producer.produce(
