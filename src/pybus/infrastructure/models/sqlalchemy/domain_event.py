@@ -15,6 +15,6 @@ class DomainEvent(Base):
     aggregate_type: Mapped[str] = mapped_column(nullable=False)
     message_type: Mapped[str] = mapped_column(nullable=False)
     occurred_on: Mapped[datetime] = mapped_column(nullable=False)
-    version: Mapped[int] = mapped_column(nullable=False)
-    created_by_id: Mapped[UUID] = mapped_column(nullable=False)
+    version: Mapped[int | None] = mapped_column(nullable=True)
+    created_by_id: Mapped[UUID | None] = mapped_column(nullable=True)
     payload: Mapped[Any] = mapped_column(JSONB, nullable=False)

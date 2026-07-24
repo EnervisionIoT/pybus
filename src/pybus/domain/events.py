@@ -19,6 +19,7 @@ class DomainEvent(TypeRegistryMixin):
     @property
     def payload(self) -> dict[str, Any]:
         return self.model_dump(
+            mode="json",
             exclude={
                 "id",
                 "correlation_id",
