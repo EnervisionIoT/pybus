@@ -205,3 +205,32 @@ def test_transaction_context_builds_context_wired_with_application_hooks():
     assert isinstance(ctx, TransactionContext)
     assert ctx._handlers_iterator == app.get_handlers
     assert ctx._on_enter_transaction_context is on_enter
+
+
+def test_application_container_self_wiring():
+    """Test that ApplicationContainer.application() resolves with reference to the container."""
+    from pybus.container.application import ApplicationContainer
+    from pybus.container.config import ApplicationSettings
+
+    # Create a real container with minimal setup
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+
+    # Mock external dependencies that are hard to set up
+    container.kafka_producer.override(MagicMock())
+    container.session.override(MagicMock())
+    container.logger.override(MagicMock())
+
+    # Resolve the application and verify container binding
+    app = container.application()
+
+    assert app._container is container
+
+
+def test_application_container_self_provider_binding():
+    """Test that __self__ is bound as a Self provider for wiring consistency."""
+    from pybus.container.application import ApplicationContainer
+    from dependency_injector import providers
+
+    # Verify __self__ is defined as a Self provider for wiring consistency
+    assert isinstance(ApplicationContainer.__self__, providers.Self)

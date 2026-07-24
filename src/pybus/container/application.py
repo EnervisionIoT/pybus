@@ -72,6 +72,8 @@ def create_application(
 
 
 class ApplicationContainer(containers.DeclarativeContainer):
+    __self__: providers.Provider["ApplicationContainer"] = providers.Self()
+
     config: providers.Provider[ApplicationSettings] = providers.Dependency(
         instance_of=ApplicationSettings
     )
@@ -81,7 +83,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
     application: providers.Provider["Application"] = providers.Singleton(
         create_application,
         name=config.provided.APPLICATION_NAME,
-        container=providers.Self(),
+        container=__self__,
         modules=application_modules,
     )
 
