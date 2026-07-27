@@ -245,6 +245,24 @@ def test_application_container_self_provider_binding():
     assert isinstance(ApplicationContainer.__self__, providers.Self)
 
 
+async def test_kafka_producer_resolves_to_a_real_instance_without_raising():
+    """Regression test: kafka_producer used to call
+    `AIOProducer(bootstrap_servers=...)`, but AIOProducer's real constructor
+    takes a single `producer_conf` dict (the librdkafka config format), not a
+    `bootstrap_servers` kwarg -- every real (unmocked) resolution crashed with
+    `TypeError: AIOProducer.__init__() got an unexpected keyword argument
+    'bootstrap_servers'`. No other test caught this because every other test
+    overrides kafka_producer with a MagicMock; this one resolves it for real."""
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+
+    producer = container.kafka_producer()
+    try:
+        assert isinstance(producer, AIOProducer)
+    finally:
+        await producer.close()
+
+
 def test_transaction_container_builds_real_instance_wired_with_injected_dependencies():
     """`transaction_container()` must genuinely construct a `TransactionContainer`
     with the container's kafka_producer/session/logger injected into it -- not
