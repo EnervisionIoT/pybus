@@ -52,6 +52,7 @@ async def test_on_enter_hook_sets_publish_event_as_a_string_dependency():
     fake_context.set_dependency = MagicMock()
     fake_context.publish_event = AsyncMock()
 
+    assert app._on_enter_transaction_context is not None
     await app._on_enter_transaction_context(fake_context)
 
     fake_context.set_dependency.assert_called_once_with("publish_event", fake_context.publish_event)
@@ -63,6 +64,7 @@ async def test_on_exit_hook_commits_and_closes_when_no_exception():
     fake_context = MagicMock()
     fake_context.get_dependency = MagicMock(return_value=session)
 
+    assert app._on_exit_transaction_context is not None
     await app._on_exit_transaction_context(fake_context, None)
 
     session.commit.assert_awaited_once()
@@ -76,6 +78,7 @@ async def test_on_exit_hook_rolls_back_and_closes_on_exception():
     fake_context = MagicMock()
     fake_context.get_dependency = MagicMock(return_value=session)
 
+    assert app._on_exit_transaction_context is not None
     await app._on_exit_transaction_context(fake_context, ValueError("boom"))
 
     session.rollback.assert_awaited_once()

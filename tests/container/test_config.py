@@ -2,7 +2,12 @@ from pybus.container.config import ApplicationSettings
 
 
 def test_default_application_settings():
-    settings = ApplicationSettings(_env_file=None)
+    # pydantic-settings accepts `_env_file` at runtime (BaseSettings.__init__
+    # splices it in to override env-file loading) but pydantic's synthesized
+    # __init__ stub for the model doesn't include leading-underscore params,
+    # so pyright sees it as an unknown keyword -- a known pydantic-settings/
+    # pyright stub gap, not a real call error.
+    settings = ApplicationSettings(_env_file=None)  # pyright: ignore[reportCallIssue]
 
     assert settings.APPLICATION_NAME == "pybus"
     assert settings.DATABASE_TYPE == "sqlalchemy"
@@ -11,8 +16,10 @@ def test_default_application_settings():
 
 
 def test_sqlalchemy_database_uri_is_built_from_postgres_fields():
+    # See test_default_application_settings above: `_env_file` is a real
+    # pydantic-settings kwarg missing from the synthesized __init__ stub.
     settings = ApplicationSettings(
-        _env_file=None,
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         POSTGRES_USER="user",
         POSTGRES_PASSWORD="pass",
         POSTGRES_SERVER="db-host",

@@ -1,7 +1,9 @@
 import uuid
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -75,7 +77,10 @@ async def session():
     async with engine.begin() as conn:
         await conn.run_sync(
             Base.metadata.create_all,
-            tables=[WidgetModel.__table__, PlainWidgetModel.__table__],
+            # DeclarativeBase.__table__ is typed as the broader FromClause
+            # (a mapped class could in principle map to a join/subquery) --
+            # both of these map directly to a single Table.
+            tables=[cast(Table, WidgetModel.__table__), cast(Table, PlainWidgetModel.__table__)],
         )
 
     async_session = AsyncSession(engine, expire_on_commit=False)
