@@ -125,7 +125,15 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
 
     kafka_producer: providers.Provider[AIOProducer] = providers.Singleton(
-        AIOProducer, bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS
+        AIOProducer,
+        # AIOProducer takes a librdkafka-style config dict as producer_conf,
+        # not a bootstrap_servers kwarg -- providers.Dict (not a plain {..}
+        # literal) is required here so the nested config.provided reference
+        # actually gets resolved instead of passed through as a Provider
+        # object.
+        producer_conf=providers.Dict(
+            {"bootstrap.servers": config.provided.KAFKA_BOOTSTRAP_SERVERS}
+        ),
     )
 
     logger = providers.Resource(init_logger, logger_name=config.provided.APPLICATION_NAME)
