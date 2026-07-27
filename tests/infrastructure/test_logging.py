@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from pybus.infrastructure.logging import LoggerFactory
+from pybus.infrastructure.logging import LoggerFactory, init_logger
 
 
 @pytest.fixture(autouse=True)
@@ -49,3 +49,21 @@ def test_create_logger_returns_the_same_singleton_instance(tmp_path, monkeypatch
     second = LoggerFactory.create_logger()
 
     assert first is second
+
+
+def test_init_logger_derives_log_relative_path_from_logger_name(tmp_path, monkeypatch):
+    """Regression: init_logger used to be called with a `log_relative_path` kwarg
+    built from an f-string over a still-unresolved dependency_injector provider
+    object (e.g. `f"logs/{config.provided.APPLICATION_NAME}.log"`), which
+    stringifies the provider's repr, not the actual application name, producing
+    an illegal filename (Windows rejects `<`/`>`) or a garbage log path
+    everywhere else. init_logger now derives the path from its own
+    (already-resolved-by-the-caller) logger_name argument instead."""
+    monkeypatch.chdir(tmp_path)
+
+    logger = init_logger(logger_name="myapp")
+
+    assert isinstance(logger, logging.Logger)
+    assert LoggerFactory.logger_name == "myapp"
+    assert LoggerFactory.log_filename == os.path.join(str(tmp_path), "logs/myapp.log")
+    assert (tmp_path / "logs").is_dir()

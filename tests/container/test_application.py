@@ -1,14 +1,20 @@
+import logging
+import os
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from confluent_kafka.aio import AIOProducer
+from dependency_injector import providers
 
 from pybus.application import ApplicationModule
 from pybus.application.commands import Command
 from pybus.application.queries import Query
-from pybus.container.application import Application, create_application
-from pybus.container.transaction import TransactionContext
+from pybus.container.application import Application, ApplicationContainer, create_application
+from pybus.container.config import ApplicationSettings
+from pybus.container.transaction import TransactionContainer, TransactionContext
 from pybus.domain.repositories import GenericRepository
+from pybus.infrastructure.database.session import DataBaseSession
 from tests.conftest import make_dummy_event
 
 
@@ -205,3 +211,151 @@ def test_transaction_context_builds_context_wired_with_application_hooks():
     assert isinstance(ctx, TransactionContext)
     assert ctx._handlers_iterator == app.get_handlers
     assert ctx._on_enter_transaction_context is on_enter
+
+
+def test_application_container_self_wiring():
+    """Test that ApplicationContainer.application() resolves with reference to the container."""
+    from pybus.container.application import ApplicationContainer
+    from pybus.container.config import ApplicationSettings
+
+    # Create a real container with minimal setup
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+
+    # Mock external dependencies that are hard to set up
+    container.kafka_producer.override(MagicMock())
+    container.session.override(MagicMock())
+    container.logger.override(MagicMock())
+
+    # Resolve the application and verify container binding
+    app = container.application()
+
+    assert app._container is container
+
+
+def test_application_container_self_provider_binding():
+    """Test that __self__ is bound as a Self provider for wiring consistency."""
+    from pybus.container.application import ApplicationContainer
+    from dependency_injector import providers
+
+    # Verify __self__ is defined as a Self provider for wiring consistency
+    assert isinstance(ApplicationContainer.__self__, providers.Self)
+
+
+def test_transaction_container_builds_real_instance_wired_with_injected_dependencies():
+    """`transaction_container()` must genuinely construct a `TransactionContainer`
+    with the container's kafka_producer/session/logger injected into it -- not
+    silently return the bare `TransactionContainer` class untouched."""
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+
+    kafka_producer = MagicMock(spec=AIOProducer)
+    session = MagicMock(spec=DataBaseSession)
+    logger = MagicMock(spec=logging.Logger)
+    container.kafka_producer.override(kafka_producer)
+    container.session.override(session)
+    container.logger.override(logger)
+
+    built = container.transaction_container()
+
+    # The old bug returned the bare class itself (Object._provide ignores
+    # args/kwargs), so guard against that regression explicitly.
+    assert built is not TransactionContainer
+    assert not isinstance(built, type)
+
+    # `TransactionContainer()` instances are dependency_injector
+    # `DynamicContainer`s (declarative containers don't support isinstance
+    # checks against themselves), so verify it's a real, correctly wired
+    # container by its provider surface and resolved values instead.
+    assert set(built.providers) == set(TransactionContainer.providers)
+    assert built.kafka_producer() is kafka_producer
+    assert built.session() is session
+    assert built.logger() is logger
+
+
+class _MarkerTransactionContainer(TransactionContainer):
+    """Throwaway subclass used to prove `transaction_container()` builds
+    whatever class `transaction_cls` currently points to, not always the
+    base `TransactionContainer` -- the entire reason for the `.provided`
+    indirection this bug fix replaces."""
+
+    marker: providers.Provider[str] = providers.Object("subclass-marker")
+
+
+def test_transaction_container_respects_transaction_cls_override_to_subclass():
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+    container.kafka_producer.override(MagicMock(spec=AIOProducer))
+    container.session.override(MagicMock(spec=DataBaseSession))
+    container.logger.override(MagicMock(spec=logging.Logger))
+
+    # `transaction_container`'s `cls=transaction_cls` kwarg is auto-resolved
+    # from the `transaction_cls` provider *at call time*, so overriding it
+    # (e.g. what a real subclass/deployment override would do) must make
+    # `transaction_container()` build the overridden class, not the base
+    # `TransactionContainer` it was declared with.
+    container.transaction_cls.override(providers.Object(_MarkerTransactionContainer))
+
+    built = container.transaction_container()
+
+    assert "marker" in built.providers
+    assert built.marker() == "subclass-marker"
+
+
+def test_dependency_accepts_subclass():
+    """Sanity test: providers.Dependency(instance_of=ApplicationSettings) accepts
+    a subclass instance via isinstance checks. This validates the documented
+    "alias, don't redeclare" escape hatch — you can safely alias the base
+    container's config provider in a subclass because isinstance allows
+    subclass instances."""
+    from dependency_injector import containers
+
+    # Create a trivial ApplicationSettings subclass
+    class CustomSettings(ApplicationSettings):
+        pass
+
+    # Create a simple container with a Dependency provider
+    class TestContainer(containers.DeclarativeContainer):
+        config: providers.Provider[ApplicationSettings] = providers.Dependency(
+            instance_of=ApplicationSettings
+        )
+
+    # Instantiate and override with a subclass instance
+    container = TestContainer()
+    custom_instance = CustomSettings()
+    container.config.override(custom_instance)
+
+    # The provider should resolve to the subclass instance without error
+    resolved = container.config()
+
+    # Verify it resolves to the instance we passed
+    assert resolved is custom_instance
+
+
+def test_application_container_logger_resolves_to_a_real_named_log_file(tmp_path, monkeypatch):
+    """Regression: `logger`'s `log_relative_path` used to be built with an
+    f-string over the still-unresolved `config.provided.APPLICATION_NAME`
+    provider object, stringifying its repr (e.g.
+    `logs/<dependency_injector.providers.AttributeGetter() at 0x...>.log`)
+    instead of the actual application name -- illegal on Windows (`<`/`>`)
+    and wrong everywhere else. Every other test overrides `container.logger`
+    with a Mock, so this bug had zero coverage; this test resolves the REAL
+    provider, unmocked, to prove the path is actually correct."""
+    from pybus.infrastructure.logging import LoggerFactory
+
+    monkeypatch.chdir(tmp_path)
+    original_configured = LoggerFactory._configured
+    original_logger = LoggerFactory._logger
+    LoggerFactory._configured = False
+    LoggerFactory._logger = None
+    try:
+        container = ApplicationContainer()
+        container.config.override(ApplicationSettings(APPLICATION_NAME="myapp"))
+
+        logger = container.logger()
+
+        assert isinstance(logger, logging.Logger)
+        assert LoggerFactory.log_filename == os.path.join(str(tmp_path), "logs/myapp.log")
+    finally:
+        LoggerFactory._configured = original_configured
+        LoggerFactory._logger = original_logger

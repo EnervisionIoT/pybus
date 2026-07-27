@@ -14,15 +14,14 @@ from pybus.domain.events import DomainEvent
 from pybus.domain.repositories import GenericRepository
 from pybus.infrastructure.database.session import DataBaseSession
 from pybus.infrastructure.database.sqlalchemy import SqlAlchemySession
+from pybus.infrastructure.logging import init_logger
 
 from .config import ApplicationSettings
 from .transaction import DependencyProvider, TransactionContainer, TransactionContext
 
 
 def create_application(
-    name: str,
-    container: "ApplicationContainer",
-    modules: list[ApplicationModule],
+    name: str, container: "ApplicationContainer", modules: list[ApplicationModule]
 ) -> "Application":
     application = Application(name=name, container=container)
 
@@ -71,17 +70,46 @@ def create_application(
     return application
 
 
+def build_transaction_container(
+    cls: type[TransactionContainer], **kwargs: Any
+) -> TransactionContainer:
+    return cls(**kwargs)
+
+
 class ApplicationContainer(containers.DeclarativeContainer):
+    __self__: providers.Provider["ApplicationContainer"] = providers.Self()  # type: ignore
+
     config: providers.Provider[ApplicationSettings] = providers.Dependency(
         instance_of=ApplicationSettings
     )
+    """Subclass redeclaration footgun: if a subclass redeclares `config` as a new
+    `providers.Dependency(...)` object (instead of aliasing it), the other inherited
+    providers that reference `config.provided.X` (`application`, `session`,
+    `kafka_producer`, `logger`) still point at the ORIGINAL base class's `config`
+    object. The subclass's `config=` constructor kwarg never reaches them because
+    provider references are captured at class-declaration time, before instance
+    initialization. This causes the subclass's config to be orphaned, and resolving
+    any of the dependent providers crashes with an infinite-recursion error.
+
+    Two correct patterns:
+
+    1. Alias instead of redeclare (preferred): use `config = ApplicationContainer.config`
+       in your subclass. This works because `providers.Dependency(instance_of=ApplicationSettings)`
+       accepts subclass instances via `isinstance` checks (see `test_dependency_accepts_subclass`).
+    2. Redeclare all dependent providers together: if you redeclare `config`, you must
+       also redeclare all providers that reference it (`application`, `session`,
+       `kafka_producer`, `logger`) in the SAME subclass body so they capture the new
+       `config` reference.
+    """
 
     application_modules: providers.Provider[list[ApplicationModule]] = providers.List()
+    """Subject to the same redeclaration footgun as `config` above — do not redeclare
+    alone without also redeclaring `application`, which references it."""
 
     application: providers.Provider["Application"] = providers.Singleton(
         create_application,
         name=config.provided.APPLICATION_NAME,
-        container=providers.Self(),
+        container=__self__,
         modules=application_modules,
     )
 
@@ -97,8 +125,12 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
 
     kafka_producer: providers.Provider[AIOProducer] = providers.Singleton(
-        AIOProducer,
-        bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS,
+        AIOProducer, bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS
+    )
+
+    logger = providers.Resource(
+        init_logger,
+        logger_name=config.provided.APPLICATION_NAME,
     )
 
     transaction_cls: providers.Provider[type[TransactionContainer]] = providers.Object(
@@ -106,9 +138,11 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
 
     transaction_container: providers.Provider[TransactionContainer] = providers.Factory(
-        transaction_cls.provided,
-        session=session,
+        build_transaction_container,
+        cls=transaction_cls,
         kafka_producer=kafka_producer,
+        session=session,
+        logger=logger,
     )
 
 
