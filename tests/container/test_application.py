@@ -299,3 +299,33 @@ def test_transaction_container_respects_transaction_cls_override_to_subclass():
 
     assert "marker" in built.providers
     assert built.marker() == "subclass-marker"
+
+
+def test_dependency_accepts_subclass():
+    """Sanity test: providers.Dependency(instance_of=ApplicationSettings) accepts
+    a subclass instance via isinstance checks. This validates the documented
+    "alias, don't redeclare" escape hatch — you can safely alias the base
+    container's config provider in a subclass because isinstance allows
+    subclass instances."""
+    from dependency_injector import containers
+
+    # Create a trivial ApplicationSettings subclass
+    class CustomSettings(ApplicationSettings):
+        pass
+
+    # Create a simple container with a Dependency provider
+    class TestContainer(containers.DeclarativeContainer):
+        config: providers.Provider[ApplicationSettings] = providers.Dependency(
+            instance_of=ApplicationSettings
+        )
+
+    # Instantiate and override with a subclass instance
+    container = TestContainer()
+    custom_instance = CustomSettings()
+    container.config.override(custom_instance)
+
+    # The provider should resolve to the subclass instance without error
+    resolved = container.config()
+
+    # Verify it resolves to the instance we passed
+    assert resolved is custom_instance
