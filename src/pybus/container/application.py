@@ -70,9 +70,9 @@ def create_application(
     return application
 
 
-def build_transaction_container(
-    cls: type[TransactionContainer], **kwargs: Any
-) -> TransactionContainer:
+def build_transaction_container[TTransactionContainer](
+    cls: type[TTransactionContainer], **kwargs: Any
+) -> TTransactionContainer:
     return cls(**kwargs)
 
 
@@ -128,10 +128,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
         AIOProducer, bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS
     )
 
-    logger = providers.Resource(
-        init_logger,
-        logger_name=config.provided.APPLICATION_NAME,
-    )
+    logger = providers.Resource(init_logger, logger_name=config.provided.APPLICATION_NAME)
 
     transaction_cls: providers.Provider[type[TransactionContainer]] = providers.Object(
         TransactionContainer
@@ -197,7 +194,8 @@ class Application(ApplicationModule):
         return func
 
     def on_exit_transaction_context(
-        self, func: Callable[[TransactionContext, BaseException | None], Awaitable[None]]
+        self,
+        func: Callable[[TransactionContext, BaseException | None], Awaitable[None]],
     ):
         self._on_exit_transaction_context = func
         return func
