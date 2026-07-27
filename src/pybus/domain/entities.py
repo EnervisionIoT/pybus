@@ -1,5 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Self
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -29,12 +30,12 @@ class EventSourced(AggregateRoot):
     _version: int = PrivateAttr(default=0)
 
     @classmethod
-    def rebuild(cls, events: list["DomainEvent"]) -> Self:
+    def rebuild(cls, events: Sequence["DomainEvent"]) -> Self:
         self = cls.model_construct()
         self.load(events)
         return self
 
-    def load(self, events: list["DomainEvent"]):
+    def load(self, events: Sequence["DomainEvent"]):
         for event in events:
             self.apply(event)
 

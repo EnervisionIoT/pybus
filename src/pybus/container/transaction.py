@@ -1,6 +1,6 @@
 import inspect
 import uuid
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Iterator
 from functools import partial
 from logging import Logger
 from types import TracebackType, UnionType
@@ -96,7 +96,7 @@ class TransactionContext:
         self._handlers_iterator: (
             Callable[
                 [Command[Any] | Query[Any] | DomainEvent],
-                Generator[Callable[..., Awaitable[Any]], None, None],
+                Iterator[Callable[..., Awaitable[Any]]],
             ]
             | None
         ) = None
@@ -105,7 +105,7 @@ class TransactionContext:
         self,
         handlers_iterator: Callable[
             [Command[Any] | Query[Any] | DomainEvent],
-            Generator[Callable[..., Awaitable[Any]], None, None],
+            Iterator[Callable[..., Awaitable[Any]]],
         ],
         on_enter_transaction_context: Callable[["TransactionContext"], Awaitable[None]]
         | None = None,
