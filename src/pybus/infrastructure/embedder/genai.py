@@ -11,8 +11,8 @@ class GenAI(Embedder):
         self.client: genai.Client = genai.Client(api_key=api_key)
 
     @override
-    def embed(self, content: str, output_dimensionality: int = 768) -> list[float]:
-        response = self.client.models.embed_content(  # type: ignore
+    async def embed(self, content: str, output_dimensionality: int = 768) -> list[float]:
+        response = await self.client.aio.models.embed_content(  # type: ignore
             model="gemini-embedding-2-preview",
             contents=content,
             config=EmbedContentConfig(output_dimensionality=output_dimensionality),
