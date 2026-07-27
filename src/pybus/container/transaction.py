@@ -24,6 +24,19 @@ class TransactionContainer(containers.DeclarativeContainer):
     logger: providers.Provider[Logger] = providers.Dependency(instance_of=Logger)
 
 
+def _is_subclass_safe(candidate: Any, target: type) -> bool:
+    """issubclass(candidate, target) but tolerant of `target` being a
+    @runtime_checkable Protocol with non-method members: CPython's typing
+    module unconditionally raises TypeError in that case, regardless of
+    `candidate`, so we fall back to an MRO check. The fallback is also the
+    only way to confirm a genuine subclass relationship once `target` is such
+    a Protocol, since issubclass() can't verify it either."""
+    try:
+        return issubclass(candidate, target)
+    except TypeError:
+        return candidate is target or target in getattr(candidate, "__mro__", ())
+
+
 class DependencyProvider:
     def __init__(self, container: containers.Container):
         self._container: containers.Container = container
@@ -31,9 +44,9 @@ class DependencyProvider:
     def resolve_provider_by_type(self, cls: type) -> providers.Provider[Any]:
         def inspect_provider(provider: providers.Provider[Any]) -> bool:
             if isinstance(provider, (providers.Factory, providers.Singleton)):
-                return inspect.isclass(provider.cls) and issubclass(provider.cls, cls)
+                return inspect.isclass(provider.cls) and _is_subclass_safe(provider.cls, cls)
             elif isinstance(provider, providers.Dependency):
-                return issubclass(provider.instance_of, cls)
+                return _is_subclass_safe(provider.instance_of, cls)
 
             return False
 
