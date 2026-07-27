@@ -1,6 +1,5 @@
 import pytest
 
-from pybus.domain.entities import Entity
 from pybus.infrastructure.repositories.memory import InMemoryRepository
 
 from tests.conftest import DummyThing, make_dummy_event
@@ -12,7 +11,7 @@ def repo() -> InMemoryRepository:
 
 
 async def test_add_and_get_by_id(repo: InMemoryRepository):
-    entity = Entity()
+    entity = DummyThing()
     await repo.add(entity)
 
     result = await repo.get_by_id(entity.id)
@@ -21,12 +20,12 @@ async def test_add_and_get_by_id(repo: InMemoryRepository):
 
 
 async def test_get_by_id_returns_none_when_missing(repo: InMemoryRepository):
-    result = await repo.get_by_id(Entity().id)
+    result = await repo.get_by_id(DummyThing().id)
     assert result is None
 
 
 async def test_get_by_ids_filters_out_missing_entities(repo: InMemoryRepository):
-    a, b = Entity(), Entity()
+    a, b = DummyThing(), DummyThing()
     await repo.add(a)
 
     result = await repo.get_by_ids([a.id, b.id])
@@ -35,7 +34,7 @@ async def test_get_by_ids_filters_out_missing_entities(repo: InMemoryRepository)
 
 
 async def test_get_all_without_pagination_returns_list(repo: InMemoryRepository):
-    a, b = Entity(), Entity()
+    a, b = DummyThing(), DummyThing()
     await repo.add(a)
     await repo.add(b)
 
@@ -45,7 +44,7 @@ async def test_get_all_without_pagination_returns_list(repo: InMemoryRepository)
 
 
 async def test_get_all_with_pagination_returns_total_and_page(repo: InMemoryRepository):
-    entities = [Entity() for _ in range(5)]
+    entities = [DummyThing() for _ in range(5)]
     for entity in entities:
         await repo.add(entity)
 
@@ -56,7 +55,7 @@ async def test_get_all_with_pagination_returns_total_and_page(repo: InMemoryRepo
 
 
 async def test_remove_deletes_entity(repo: InMemoryRepository):
-    entity = Entity()
+    entity = DummyThing()
     await repo.add(entity)
 
     await repo.remove(entity)
@@ -65,7 +64,7 @@ async def test_remove_deletes_entity(repo: InMemoryRepository):
 
 
 async def test_restore_re_adds_entity(repo: InMemoryRepository):
-    entity = Entity()
+    entity = DummyThing()
     await repo.add(entity)
     await repo.remove(entity)
 
@@ -85,17 +84,19 @@ async def test_get_event_history_returns_events_for_aggregate_root(repo: InMemor
     assert history == [event]
 
 
-async def test_get_event_history_returns_empty_for_plain_entity(repo: InMemoryRepository):
-    entity = Entity()
-    await repo.add(entity)
+async def test_get_event_history_returns_empty_for_aggregate_root_with_no_events(
+    repo: InMemoryRepository,
+):
+    thing = DummyThing()
+    await repo.add(thing)
 
-    history = await repo.get_event_history(entity.id)
+    history = await repo.get_event_history(thing.id)
 
     assert history == []
 
 
 async def test_get_event_history_returns_empty_when_entity_missing(repo: InMemoryRepository):
-    history = await repo.get_event_history(Entity().id)
+    history = await repo.get_event_history(DummyThing().id)
     assert history == []
 
 
