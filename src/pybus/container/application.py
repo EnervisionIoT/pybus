@@ -71,6 +71,12 @@ def create_application(
     return application
 
 
+def build_transaction_container(
+    cls: type[TransactionContainer], **kwargs: Any
+) -> TransactionContainer:
+    return cls(**kwargs)
+
+
 class ApplicationContainer(containers.DeclarativeContainer):
     __self__: providers.Provider["ApplicationContainer"] = providers.Self()
 
@@ -108,7 +114,8 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
 
     transaction_container: providers.Provider[TransactionContainer] = providers.Factory(
-        transaction_cls.provided,
+        build_transaction_container,
+        cls=transaction_cls,
         session=session,
         kafka_producer=kafka_producer,
     )

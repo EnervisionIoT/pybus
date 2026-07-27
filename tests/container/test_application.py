@@ -1,14 +1,19 @@
+import logging
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from confluent_kafka.aio import AIOProducer
+from dependency_injector import providers
 
 from pybus.application import ApplicationModule
 from pybus.application.commands import Command
 from pybus.application.queries import Query
-from pybus.container.application import Application, create_application
-from pybus.container.transaction import TransactionContext
+from pybus.container.application import Application, ApplicationContainer, create_application
+from pybus.container.config import ApplicationSettings
+from pybus.container.transaction import TransactionContainer, TransactionContext
 from pybus.domain.repositories import GenericRepository
+from pybus.infrastructure.database.session import DataBaseSession
 from tests.conftest import make_dummy_event
 
 
@@ -234,3 +239,63 @@ def test_application_container_self_provider_binding():
 
     # Verify __self__ is defined as a Self provider for wiring consistency
     assert isinstance(ApplicationContainer.__self__, providers.Self)
+
+
+def test_transaction_container_builds_real_instance_wired_with_injected_dependencies():
+    """`transaction_container()` must genuinely construct a `TransactionContainer`
+    with the container's kafka_producer/session/logger injected into it -- not
+    silently return the bare `TransactionContainer` class untouched."""
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+
+    kafka_producer = MagicMock(spec=AIOProducer)
+    session = MagicMock(spec=DataBaseSession)
+    logger = MagicMock(spec=logging.Logger)
+    container.kafka_producer.override(kafka_producer)
+    container.session.override(session)
+    container.logger.override(logger)
+
+    built = container.transaction_container()
+
+    # The old bug returned the bare class itself (Object._provide ignores
+    # args/kwargs), so guard against that regression explicitly.
+    assert built is not TransactionContainer
+    assert not isinstance(built, type)
+
+    # `TransactionContainer()` instances are dependency_injector
+    # `DynamicContainer`s (declarative containers don't support isinstance
+    # checks against themselves), so verify it's a real, correctly wired
+    # container by its provider surface and resolved values instead.
+    assert set(built.providers) == set(TransactionContainer.providers)
+    assert built.kafka_producer() is kafka_producer
+    assert built.session() is session
+    assert built.logger() is logger
+
+
+class _MarkerTransactionContainer(TransactionContainer):
+    """Throwaway subclass used to prove `transaction_container()` builds
+    whatever class `transaction_cls` currently points to, not always the
+    base `TransactionContainer` -- the entire reason for the `.provided`
+    indirection this bug fix replaces."""
+
+    marker: providers.Provider[str] = providers.Object("subclass-marker")
+
+
+def test_transaction_container_respects_transaction_cls_override_to_subclass():
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+    container.kafka_producer.override(MagicMock(spec=AIOProducer))
+    container.session.override(MagicMock(spec=DataBaseSession))
+    container.logger.override(MagicMock(spec=logging.Logger))
+
+    # `transaction_container`'s `cls=transaction_cls` kwarg is auto-resolved
+    # from the `transaction_cls` provider *at call time*, so overriding it
+    # (e.g. what a real subclass/deployment override would do) must make
+    # `transaction_container()` build the overridden class, not the base
+    # `TransactionContainer` it was declared with.
+    container.transaction_cls.override(providers.Object(_MarkerTransactionContainer))
+
+    built = container.transaction_container()
+
+    assert "marker" in built.providers
+    assert built.marker() == "subclass-marker"
