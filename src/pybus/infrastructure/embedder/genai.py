@@ -1,6 +1,6 @@
 from typing import override
 
-from google import genai
+import google.genai as genai
 from google.genai.types import EmbedContentConfig
 
 from pybus.application.interfaces import Embedder

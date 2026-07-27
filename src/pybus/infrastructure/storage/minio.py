@@ -2,7 +2,7 @@ import io
 import mimetypes
 import secrets
 from pathlib import Path
-from typing import override
+from typing import BinaryIO, cast, override
 
 from minio import Minio as MinioClient
 from minio.commonconfig import ENABLED, Filter
@@ -83,7 +83,14 @@ class Minio(Storage):
         self._client.put_object(
             bucket_name=bucket,
             object_name=object_name,
-            data=file.stream,
+            # FileObject.stream is declared as io.IOBase (not typing.BinaryIO)
+            # so pydantic's arbitrary_types_allowed isinstance check still
+            # accepts io.BytesIO -- io.BytesIO isn't an instance of
+            # typing.BinaryIO at runtime, and typeshed's io.* and typing.IO*
+            # hierarchies aren't nominally related either way. Every real
+            # FileObject is constructed with an io.BytesIO stream, which is
+            # structurally binary.
+            data=cast(BinaryIO, file.stream),
             length=file.size,
             content_type=file.content_type,
         )
