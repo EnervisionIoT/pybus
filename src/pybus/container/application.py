@@ -122,6 +122,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
         cls=transaction_cls,
         kafka_producer=kafka_producer,
         session=session,
+        logger=logger,
     )
 
 
