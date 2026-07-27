@@ -13,6 +13,7 @@ def test_default_application_settings():
     assert settings.DATABASE_TYPE == "sqlalchemy"
     assert settings.POSTGRES_SERVER == "postgres"
     assert settings.POSTGRES_PORT == 5432
+    assert settings.POSTGRES_SCHEMA == "public"
 
 
 def test_sqlalchemy_database_uri_is_built_from_postgres_fields():

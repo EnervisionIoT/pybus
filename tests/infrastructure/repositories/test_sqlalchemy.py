@@ -7,6 +7,7 @@ from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pybus.container.config import ApplicationSettings
 from pybus.domain.entities import AggregateRoot
 from pybus.domain.exceptions import EntityNotFoundException, SoftDeleteException
 from pybus.infrastructure.database.sqlalchemy import Base, SoftDeleteMixin
@@ -73,7 +74,13 @@ class ThingRepository(SqlAlchemyGenericRepository[DummyThing, WidgetModel]):
 async def session():
     # Only create tables for our own test models — Base.metadata also holds
     # DomainEvent (postgresql JSONB), which SQLite cannot compile DDL for.
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    # schema_translate_map remaps Base.metadata.schema ("public") to no
+    # schema at all for this connection -- SQLite has no equivalent of a
+    # Postgres schema/namespace, so a schema-qualified table name (e.g.
+    # `public.widget_models`) fails outright ("unknown database public").
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:").execution_options(
+        schema_translate_map={ApplicationSettings().POSTGRES_SCHEMA: None}
+    )
     async with engine.begin() as conn:
         await conn.run_sync(
             Base.metadata.create_all,

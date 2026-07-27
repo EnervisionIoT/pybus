@@ -14,6 +14,7 @@ class ApplicationSettings(BaseSettings):
     POSTGRES_USER: str = "acmepoint"
     POSTGRES_PASSWORD: str = "93614849"
     POSTGRES_DB: str = "ACMEPOINT"
+    POSTGRES_SCHEMA: str = "public"
 
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
 
