@@ -131,7 +131,6 @@ class ApplicationContainer(containers.DeclarativeContainer):
     logger = providers.Resource(
         init_logger,
         logger_name=config.provided.APPLICATION_NAME,
-        log_relative_path=f"logs/{config.provided.APPLICATION_NAME}.log",
     )
 
     transaction_cls: providers.Provider[type[TransactionContainer]] = providers.Object(

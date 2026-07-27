@@ -1,4 +1,5 @@
 import logging
+import os
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock
 
@@ -329,3 +330,32 @@ def test_dependency_accepts_subclass():
 
     # Verify it resolves to the instance we passed
     assert resolved is custom_instance
+
+
+def test_application_container_logger_resolves_to_a_real_named_log_file(tmp_path, monkeypatch):
+    """Regression: `logger`'s `log_relative_path` used to be built with an
+    f-string over the still-unresolved `config.provided.APPLICATION_NAME`
+    provider object, stringifying its repr (e.g.
+    `logs/<dependency_injector.providers.AttributeGetter() at 0x...>.log`)
+    instead of the actual application name -- illegal on Windows (`<`/`>`)
+    and wrong everywhere else. Every other test overrides `container.logger`
+    with a Mock, so this bug had zero coverage; this test resolves the REAL
+    provider, unmocked, to prove the path is actually correct."""
+    from pybus.infrastructure.logging import LoggerFactory
+
+    monkeypatch.chdir(tmp_path)
+    original_configured = LoggerFactory._configured
+    original_logger = LoggerFactory._logger
+    LoggerFactory._configured = False
+    LoggerFactory._logger = None
+    try:
+        container = ApplicationContainer()
+        container.config.override(ApplicationSettings(APPLICATION_NAME="myapp"))
+
+        logger = container.logger()
+
+        assert isinstance(logger, logging.Logger)
+        assert LoggerFactory.log_filename == os.path.join(str(tmp_path), "logs/myapp.log")
+    finally:
+        LoggerFactory._configured = original_configured
+        LoggerFactory._logger = original_logger

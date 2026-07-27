@@ -77,6 +77,6 @@ class LoggerFactory:
         return cls._logger
 
 
-def init_logger(logger_name: str, log_relative_path: str) -> logging.Logger:
-    LoggerFactory.configure(logger_name=logger_name, log_relative_path=log_relative_path)
+def init_logger(logger_name: str) -> logging.Logger:
+    LoggerFactory.configure(logger_name=logger_name, log_relative_path=f"logs/{logger_name}.log")
     return LoggerFactory.create_logger()
