@@ -14,15 +14,14 @@ from pybus.domain.events import DomainEvent
 from pybus.domain.repositories import GenericRepository
 from pybus.infrastructure.database.session import DataBaseSession
 from pybus.infrastructure.database.sqlalchemy import SqlAlchemySession
+from pybus.infrastructure.logging import init_logger
 
 from .config import ApplicationSettings
 from .transaction import DependencyProvider, TransactionContainer, TransactionContext
 
 
 def create_application(
-    name: str,
-    container: "ApplicationContainer",
-    modules: list[ApplicationModule],
+    name: str, container: "ApplicationContainer", modules: list[ApplicationModule]
 ) -> "Application":
     application = Application(name=name, container=container)
 
@@ -105,8 +104,13 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
 
     kafka_producer: providers.Provider[AIOProducer] = providers.Singleton(
-        AIOProducer,
-        bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS,
+        AIOProducer, bootstrap_servers=config.provided.KAFKA_BOOTSTRAP_SERVERS
+    )
+
+    logger = providers.Resource(
+        init_logger,
+        logger_name=config.provided.APPLICATION_NAME,
+        log_relative_path=f"logs/{config.provided.APPLICATION_NAME}.log",
     )
 
     transaction_cls: providers.Provider[type[TransactionContainer]] = providers.Object(
@@ -116,8 +120,8 @@ class ApplicationContainer(containers.DeclarativeContainer):
     transaction_container: providers.Provider[TransactionContainer] = providers.Factory(
         build_transaction_container,
         cls=transaction_cls,
-        session=session,
         kafka_producer=kafka_producer,
+        session=session,
     )
 
 

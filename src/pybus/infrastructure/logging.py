@@ -75,3 +75,8 @@ class LoggerFactory:
         dictConfig(logging_config)
         cls._logger = logging.getLogger(cls.logger_name)
         return cls._logger
+
+
+def init_logger(logger_name: str, log_relative_path: str) -> logging.Logger:
+    LoggerFactory.configure(logger_name=logger_name, log_relative_path=log_relative_path)
+    return LoggerFactory.create_logger()
