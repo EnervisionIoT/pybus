@@ -17,6 +17,7 @@ class ApplicationSettings(BaseSettings):
     POSTGRES_SCHEMA: str = "public"
 
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
+    KAFKA_CONSUMER_GROUP_ID: str = "pybus"
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_file=".env",

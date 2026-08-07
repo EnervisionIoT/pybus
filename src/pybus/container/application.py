@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, overload
 
-from confluent_kafka.aio import AIOProducer
+from confluent_kafka.aio import AIOConsumer, AIOProducer
 from dependency_injector import containers, providers
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -133,6 +133,17 @@ class ApplicationContainer(containers.DeclarativeContainer):
         # object.
         producer_conf=providers.Dict(
             {"bootstrap.servers": config.provided.KAFKA_BOOTSTRAP_SERVERS}
+        ),
+    )
+
+    kafka_consumer: providers.Provider[AIOConsumer] = providers.Singleton(
+        AIOConsumer,
+        consumer_conf=providers.Dict(
+            {
+                "bootstrap.servers": config.provided.KAFKA_BOOTSTRAP_SERVERS,
+                "group.id": config.provided.KAFKA_CONSUMER_GROUP_ID,
+                "enable.auto.commit": False,
+            }
         ),
     )
 

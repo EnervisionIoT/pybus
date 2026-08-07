@@ -380,3 +380,23 @@ def test_application_container_logger_resolves_to_a_real_named_log_file(tmp_path
     finally:
         LoggerFactory._configured = original_configured
         LoggerFactory._logger = original_logger
+
+
+async def test_kafka_consumer_provider_resolves_to_an_aio_consumer():
+    from confluent_kafka.aio import AIOConsumer
+
+    settings = ApplicationSettings(KAFKA_BOOTSTRAP_SERVERS="localhost:9092")
+    container = ApplicationContainer()
+    container.config.override(settings)
+
+    consumer = container.kafka_consumer()
+
+    try:
+        assert isinstance(consumer, AIOConsumer)
+    finally:
+        await consumer.close()
+
+
+def test_kafka_consumer_group_id_setting_has_a_default():
+    settings = ApplicationSettings()
+    assert settings.KAFKA_CONSUMER_GROUP_ID == "pybus"
