@@ -1,5 +1,6 @@
 import logging
 import os
+import uuid
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock
 
@@ -178,6 +179,45 @@ async def test_execute_dispatches_domain_event(monkeypatch: pytest.MonkeyPatch):
 
     assert result is None
     fake_ctx.execute_event.assert_awaited_once_with(event)
+
+
+class _FakeSession:
+    def __init__(self):
+        self.info: dict = {}
+
+
+class _FakeDataBaseSession:
+    def __init__(self):
+        self.connection = _FakeSession()
+
+
+async def test_execute_stashes_created_by_id_on_the_session_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app = build_application()
+    fake_ctx = FakeTransactionContext()
+    fake_db_session = _FakeDataBaseSession()
+    fake_ctx.get_dependency = MagicMock(return_value=fake_db_session)
+    monkeypatch.setattr(app, "transaction_context", lambda: fake_ctx)
+
+    created_by_id = uuid.uuid4()
+    await app.execute(DoThing(), created_by_id=created_by_id)
+
+    fake_ctx.get_dependency.assert_called_once_with(DataBaseSession)
+    assert fake_db_session.connection.info["created_by_id"] == created_by_id
+
+
+async def test_execute_does_not_touch_the_session_when_created_by_id_is_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app = build_application()
+    fake_ctx = FakeTransactionContext()
+    fake_ctx.get_dependency = MagicMock()
+    monkeypatch.setattr(app, "transaction_context", lambda: fake_ctx)
+
+    await app.execute(DoThing())
+
+    fake_ctx.get_dependency.assert_not_called()
 
 
 def test_on_enter_transaction_context_decorator_stores_and_returns_func():

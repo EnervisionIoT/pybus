@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, overload
@@ -179,28 +180,47 @@ class Application(ApplicationModule):
 
     @overload
     async def execute[TResult](
-        self, message: Command[TResult], pagination: None = None
+        self,
+        message: Command[TResult],
+        pagination: None = None,
+        created_by_id: uuid.UUID | None = None,
     ) -> TResult: ...
 
     @overload
     async def execute[TResult](
-        self, message: Query[TResult], pagination: None = None
+        self,
+        message: Query[TResult],
+        pagination: None = None,
+        created_by_id: uuid.UUID | None = None,
     ) -> TResult: ...
 
     @overload
     async def execute[TResult](
-        self, message: Query[TResult], pagination: PaginationQuery
+        self,
+        message: Query[TResult],
+        pagination: PaginationQuery,
+        created_by_id: uuid.UUID | None = None,
     ) -> tuple[int, TResult]: ...
 
     @overload
-    async def execute(self, message: DomainEvent, pagination: None = None) -> None: ...
+    async def execute(
+        self,
+        message: DomainEvent,
+        pagination: None = None,
+        created_by_id: uuid.UUID | None = None,
+    ) -> None: ...
 
     async def execute[TResult](
         self,
         message: Command[TResult] | Query[TResult] | DomainEvent,
         pagination: PaginationQuery | None = None,
+        created_by_id: uuid.UUID | None = None,
     ) -> TResult | tuple[int, TResult] | None:
         async with self.transaction_context() as ctx:
+            if created_by_id is not None:
+                session = ctx.get_dependency(DataBaseSession)
+                session.connection.info["created_by_id"] = created_by_id
+
             if isinstance(message, Command):
                 return await ctx.execute_command(message)
             if isinstance(message, DomainEvent):

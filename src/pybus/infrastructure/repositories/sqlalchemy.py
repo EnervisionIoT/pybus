@@ -196,6 +196,15 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     @override
     async def save_domain_events(self) -> list[DomainEvent]:
         events = await self.collect_events()
+        # `created_by_id` is stashed here by `Application.execute` (see
+        # `pybus.container.application`) onto this same `AsyncSession`'s
+        # `.info` dict -- reading it back here (rather than threading it in
+        # as a parameter) means a future event that sets its own
+        # `created_by_id` explicitly is never overwritten by this fallback.
+        created_by_id = self._session.info.get("created_by_id")
+        for domain_event in events:
+            if domain_event.created_by_id is None and created_by_id is not None:
+                domain_event.created_by_id = created_by_id
         self._session.add_all(
             [
                 DomainEventModel(

@@ -418,6 +418,47 @@ async def test_save_domain_events_returns_empty_when_no_events_registered():
     session.add_all.assert_called_once_with([])
 
 
+async def test_save_domain_events_stamps_created_by_id_from_the_session():
+    created_by_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"created_by_id": created_by_id}
+    repo = ThingRepository(session, correlation_id=uuid.uuid4())
+
+    thing = DummyThing()
+    event = make_dummy_event(aggregate_id=thing.id, version=1)
+    assert event.created_by_id is None
+    thing.register_event(event)
+    await repo.add(thing)
+
+    saved_events = await repo.save_domain_events()
+
+    assert saved_events == [event]
+    assert event.created_by_id == created_by_id
+    (persisted_models,), _ = session.add_all.call_args
+    assert persisted_models[0].created_by_id == created_by_id
+
+
+async def test_save_domain_events_does_not_overwrite_an_already_set_created_by_id():
+    own_creator = uuid.uuid4()
+    session_creator = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"created_by_id": session_creator}
+    repo = ThingRepository(session, correlation_id=uuid.uuid4())
+
+    thing = DummyThing()
+    event = make_dummy_event(aggregate_id=thing.id, version=1)
+    event.created_by_id = own_creator
+    thing.register_event(event)
+    await repo.add(thing)
+
+    saved_events = await repo.save_domain_events()
+
+    assert saved_events == [event]
+    assert event.created_by_id == own_creator
+    (persisted_models,), _ = session.add_all.call_args
+    assert persisted_models[0].created_by_id == own_creator
+
+
 async def test_get_event_history_deserializes_rows_into_domain_events():
     aggregate_id = uuid.uuid4()
     stored = DomainEventModel(
