@@ -85,6 +85,12 @@ async def test_aexit_rolls_back_on_exception_and_always_closes(engine):
 
 
 async def test_set_tenant_context_delegates_to_underlying_async_session(engine):
+    # `tenant_id` is interpolated directly into the statement text rather
+    # than passed as a bind parameter: Postgres's `SET LOCAL` grammar
+    # doesn't accept a parameter for the value (confirmed against a real
+    # connection -- `SET LOCAL app.tenant_id = $1` is a syntax error).
+    # Safe here because the parameter type is `uuid.UUID`, whose `str()`
+    # can only ever produce the canonical hex-and-hyphen form.
     session = SqlAlchemySession(engine)
     session._session.execute = AsyncMock()
     tenant_id = uuid.uuid4()
@@ -92,11 +98,10 @@ async def test_set_tenant_context_delegates_to_underlying_async_session(engine):
     await session.set_tenant_context(tenant_id)
 
     session._session.execute.assert_awaited_once()
-    args, kwargs = session._session.execute.call_args
+    args, _kwargs = session._session.execute.call_args
     statement = args[0]
-    assert statement.text == "SET LOCAL app.tenant_id = :tenant_id"
-    params = args[1] if len(args) > 1 else kwargs.get("parameters")
-    assert params == {"tenant_id": str(tenant_id)}
+    assert statement.text == f"SET LOCAL app.tenant_id = '{tenant_id}'"
+    assert len(args) == 1
 
 
 async def test_set_platform_context_delegates_to_underlying_async_session(engine):

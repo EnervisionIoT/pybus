@@ -40,9 +40,17 @@ class SqlAlchemySession(DataBaseSession):
 
     @override
     async def set_tenant_context(self, tenant_id: uuid.UUID):
-        await self._session.execute(
-            text("SET LOCAL app.tenant_id = :tenant_id"), {"tenant_id": str(tenant_id)}
-        )
+        # Postgres's `SET`/`SET LOCAL` grammar does not accept a bind
+        # parameter for the value (confirmed against a real connection --
+        # it raises a syntax error at the resulting `$1` placeholder), so
+        # this can't be `text("SET LOCAL app.tenant_id = :tenant_id")`
+        # with `{"tenant_id": ...}` like a normal query. Interpolating
+        # `tenant_id` directly is safe here specifically because the
+        # parameter type is `uuid.UUID`, not `str` -- `str(tenant_id)` on
+        # a real UUID instance can only ever produce the canonical
+        # 36-character hex-and-hyphen form, which contains no characters
+        # that could break out of the surrounding SQL.
+        await self._session.execute(text(f"SET LOCAL app.tenant_id = '{tenant_id}'"))
 
     @override
     async def set_platform_context(self):
