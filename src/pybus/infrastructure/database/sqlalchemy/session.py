@@ -51,7 +51,3 @@ class SqlAlchemySession(DataBaseSession):
         # 36-character hex-and-hyphen form, which contains no characters
         # that could break out of the surrounding SQL.
         await self._session.execute(text(f"SET LOCAL app.tenant_id = '{tenant_id}'"))
-
-    @override
-    async def set_platform_context(self):
-        await self._session.execute(text("SET LOCAL app.is_platform = 'true'"))

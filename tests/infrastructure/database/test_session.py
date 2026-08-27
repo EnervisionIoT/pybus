@@ -17,7 +17,6 @@ def test_sqlalchemy_session_satisfies_database_session_protocol(engine):
     session = SqlAlchemySession(engine)
     assert isinstance(session, DataBaseSession)
     assert hasattr(session, "set_tenant_context")
-    assert hasattr(session, "set_platform_context")
 
 
 def test_connection_property_returns_the_underlying_async_session(engine):
@@ -101,17 +100,4 @@ async def test_set_tenant_context_delegates_to_underlying_async_session(engine):
     args, _kwargs = session._session.execute.call_args
     statement = args[0]
     assert statement.text == f"SET LOCAL app.tenant_id = '{tenant_id}'"
-    assert len(args) == 1
-
-
-async def test_set_platform_context_delegates_to_underlying_async_session(engine):
-    session = SqlAlchemySession(engine)
-    session._session.execute = AsyncMock()
-
-    await session.set_platform_context()
-
-    session._session.execute.assert_awaited_once()
-    args, _kwargs = session._session.execute.call_args
-    statement = args[0]
-    assert statement.text == "SET LOCAL app.is_platform = 'true'"
     assert len(args) == 1

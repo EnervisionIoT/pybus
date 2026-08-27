@@ -231,36 +231,6 @@ async def test_execute_sets_tenant_context_when_tenant_id_given(monkeypatch: pyt
     await app.execute(DoThing(), tenant_id=tenant_id)
 
     fake_db_session.set_tenant_context.assert_awaited_once_with(tenant_id)
-    fake_db_session.set_platform_context.assert_not_called()
-
-
-async def test_execute_sets_platform_context_when_is_platform_given(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    app = build_application()
-    fake_ctx = FakeTransactionContext()
-    fake_db_session = AsyncMock()
-    fake_ctx.get_dependency = MagicMock(return_value=fake_db_session)
-    monkeypatch.setattr(app, "transaction_context", lambda: fake_ctx)
-
-    await app.execute(DoThing(), is_platform=True)
-
-    fake_db_session.set_platform_context.assert_awaited_once()
-    fake_db_session.set_tenant_context.assert_not_called()
-
-
-async def test_execute_raises_when_tenant_id_and_is_platform_both_given(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    app = build_application()
-    fake_ctx = FakeTransactionContext()
-    fake_ctx.get_dependency = MagicMock()
-    monkeypatch.setattr(app, "transaction_context", lambda: fake_ctx)
-
-    with pytest.raises(ValueError):
-        await app.execute(DoThing(), tenant_id=uuid.uuid4(), is_platform=True)
-
-    fake_ctx.get_dependency.assert_not_called()
 
 
 def test_on_enter_transaction_context_decorator_stores_and_returns_func():

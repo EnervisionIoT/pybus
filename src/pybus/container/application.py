@@ -185,7 +185,6 @@ class Application(ApplicationModule):
         pagination: None = None,
         created_by_id: uuid.UUID | None = None,
         tenant_id: uuid.UUID | None = None,
-        is_platform: bool = False,
     ) -> TResult: ...
 
     @overload
@@ -195,7 +194,6 @@ class Application(ApplicationModule):
         pagination: None = None,
         created_by_id: uuid.UUID | None = None,
         tenant_id: uuid.UUID | None = None,
-        is_platform: bool = False,
     ) -> TResult: ...
 
     @overload
@@ -205,7 +203,6 @@ class Application(ApplicationModule):
         pagination: PaginationQuery,
         created_by_id: uuid.UUID | None = None,
         tenant_id: uuid.UUID | None = None,
-        is_platform: bool = False,
     ) -> tuple[int, TResult]: ...
 
     @overload
@@ -215,7 +212,6 @@ class Application(ApplicationModule):
         pagination: None = None,
         created_by_id: uuid.UUID | None = None,
         tenant_id: uuid.UUID | None = None,
-        is_platform: bool = False,
     ) -> None: ...
 
     async def execute[TResult](
@@ -224,21 +220,15 @@ class Application(ApplicationModule):
         pagination: PaginationQuery | None = None,
         created_by_id: uuid.UUID | None = None,
         tenant_id: uuid.UUID | None = None,
-        is_platform: bool = False,
     ) -> TResult | tuple[int, TResult] | None:
-        if is_platform and tenant_id is not None:
-            raise ValueError("tenant_id and is_platform are mutually exclusive")
-
         async with self.transaction_context() as ctx:
-            if created_by_id is not None or is_platform or tenant_id is not None:
+            if created_by_id is not None or tenant_id is not None:
                 session = ctx.get_dependency(DataBaseSession)
 
                 if created_by_id is not None:
                     session.connection.info["created_by_id"] = created_by_id
 
-                if is_platform:
-                    await session.set_platform_context()
-                elif tenant_id is not None:
+                if tenant_id is not None:
                     await session.set_tenant_context(tenant_id)
 
             if isinstance(message, Command):
