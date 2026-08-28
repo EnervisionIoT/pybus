@@ -29,5 +29,5 @@ class DomainEvent(TypeRegistryMixin):
                 "occurred_on",
                 "version",
                 "created_by_id",
-            }
+            },
         )

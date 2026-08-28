@@ -263,6 +263,12 @@ class Application(ApplicationModule):
                     session.connection.info["created_by_id"] = created_by_id
 
                 if tenant_id is not None:
+                    # Stashed for `save_domain_events()`, the same way
+                    # `created_by_id` is on the line above.
+                    # `set_tenant_context` issues SET LOCAL app.tenant_id,
+                    # which puts the value where Postgres's policies can read
+                    # it and nowhere Python can read it back.
+                    session.connection.info["tenant_id"] = tenant_id
                     await session.set_tenant_context(tenant_id)
 
             if isinstance(message, Command):

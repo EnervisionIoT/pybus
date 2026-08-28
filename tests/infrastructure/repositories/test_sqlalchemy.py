@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from pybus.container.config import ApplicationSettings
 from pybus.domain.entities import AggregateRoot
+from pybus.domain.events import DomainEvent
 from pybus.domain.exceptions import EntityNotFoundException, SoftDeleteException
 from pybus.infrastructure.database.sqlalchemy import Base, SoftDeleteMixin
 from pybus.infrastructure.models.sqlalchemy import DomainEvent as DomainEventModel
@@ -383,6 +384,11 @@ async def test_restore_undoes_a_soft_delete(repo: WidgetRepository, session: Asy
 async def test_save_domain_events_persists_via_session_add_all_and_returns_them():
     session = MagicMock()
     session.add_all = MagicMock()
+    # A real dict, not the MagicMock default. `session.info.get(...)` on a
+    # bare MagicMock returns another MagicMock rather than None, so every
+    # value read from `.info` here would be silently stamped as a mock and
+    # no assertion would notice.
+    session.info = {}
     correlation_id = uuid.uuid4()
     repo = ThingRepository(session, correlation_id=correlation_id)
 
@@ -409,6 +415,7 @@ async def test_save_domain_events_persists_via_session_add_all_and_returns_them(
 async def test_save_domain_events_returns_empty_when_no_events_registered():
     session = MagicMock()
     session.add_all = MagicMock()
+    session.info = {}
     repo = ThingRepository(session, correlation_id=uuid.uuid4())
     await repo.add(DummyThing())
 
@@ -500,3 +507,69 @@ async def test_get_event_history_returns_empty_list_when_no_rows():
     history = await repo.get_event_history(uuid.uuid4())
 
     assert history == []
+
+
+async def test_save_domain_events_stamps_tenant_id_from_the_session():
+    """Same mechanism as created_by_id: Application.execute stashes the
+    transaction's tenant on the session, and the row is stamped from it."""
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.add_all = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    repo = ThingRepository(session, correlation_id=uuid.uuid4())
+
+    thing = DummyThing()
+    thing.register_event(make_dummy_event(aggregate_id=thing.id))
+    await repo.add(thing)
+    await repo.save_domain_events()
+
+    (persisted_models,), _ = session.add_all.call_args
+    assert persisted_models[0].tenant_id == tenant_id
+
+
+async def test_save_domain_events_leaves_tenant_id_null_without_a_tenant_context():
+    """A service with no multi-tenancy calls execute() without a tenant, and
+    NULL is the honest answer rather than a fabricated one."""
+    session = MagicMock()
+    session.add_all = MagicMock()
+    session.info = {}
+    repo = ThingRepository(session, correlation_id=uuid.uuid4())
+
+    thing = DummyThing()
+    thing.register_event(make_dummy_event(aggregate_id=thing.id))
+    await repo.add(thing)
+    await repo.save_domain_events()
+
+    (persisted_models,), _ = session.add_all.call_args
+    assert persisted_models[0].tenant_id is None
+
+
+async def test_save_domain_events_ignores_a_tenant_id_declared_on_the_event():
+    """The column records where the write happened, and the event does not
+    get a say in that.
+
+    An event may well carry its own tenant_id field -- and for events about
+    another tenant that value is deliberately different from the writing
+    context. Taking it from the event would put a value in the column that
+    the row-level security policy can never match, so the insert would fail
+    or the row would be invisible.
+    """
+    writing_tenant = uuid.uuid4()
+    session = MagicMock()
+    session.add_all = MagicMock()
+    session.info = {"tenant_id": writing_tenant}
+    repo = ThingRepository(session, correlation_id=uuid.uuid4())
+
+    class TenantScopedEvent(DomainEvent):
+        aggregate_type: str = "Thing"
+        tenant_id: uuid.UUID
+
+    thing = DummyThing()
+    thing.register_event(TenantScopedEvent(aggregate_id=thing.id, tenant_id=uuid.uuid4()))
+    await repo.add(thing)
+    await repo.save_domain_events()
+
+    (persisted_models,), _ = session.add_all.call_args
+    assert persisted_models[0].tenant_id == writing_tenant
+    # ...and the event's own value still travels, in the payload.
+    assert "tenant_id" in persisted_models[0].payload

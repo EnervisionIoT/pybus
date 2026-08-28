@@ -5,6 +5,7 @@ def test_domain_event_model_has_expected_columns():
     columns = {column.name for column in DomainEvent.__table__.columns}
     assert columns == {
         "id",
+        "tenant_id",
         "correlation_id",
         "aggregate_id",
         "aggregate_type",
@@ -36,3 +37,12 @@ def test_domain_event_model_version_and_created_by_id_are_nullable():
     assert DomainEvent.__table__.columns["version"].nullable is True
     assert DomainEvent.__table__.columns["created_by_id"].nullable is True
     assert DomainEvent.__table__.columns["correlation_id"].nullable is False
+
+
+def test_domain_event_model_tenant_id_is_nullable():
+    # pybus is shared with services that establish no tenant context at all,
+    # and their rows are legitimately NULL. A service behind row-level
+    # security declares this NOT NULL in its own migration instead -- which
+    # is the same permissive-framework / strict-service split that already
+    # applies to the rest of this table.
+    assert DomainEvent.__table__.columns["tenant_id"].nullable is True
