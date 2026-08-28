@@ -24,8 +24,9 @@ async def run_event_consumer(
     are committed only after a message has been through `execute()`
     (`enable.auto.commit: False` on the consumer config -- see
     `ApplicationContainer.kafka_consumer`), giving at-least-once delivery.
-    A single message's exception is logged, not raised -- one poisoned
-    message must not wedge the whole consumer loop (see the notify design
+    Each message is dispatched inside its own tenant context, taken from the
+    event's envelope. A single message's exception is logged, not raised --
+    one poisoned message must not wedge the whole consumer loop (see the notify design
     spec's Risks section: there is no dead-letter queue in this round)."""
     stop_event = stop_event or asyncio.Event()
 
@@ -41,7 +42,13 @@ async def run_event_consumer(
 
             try:
                 event = DomainEvent.deserialize(json.loads(msg.value()))
-                await application.execute(event)
+                # The tenant rides on the envelope, so a handler behind a
+                # row-level security policy has the context it needs to write
+                # anything at all. Without it every insert is refused and
+                # every select comes back empty, with nothing raised to say
+                # why. `None` for a service that has no tenants, which is
+                # what `execute` already expects.
+                await application.execute(event, tenant_id=event.tenant_id)
             except Exception:
                 logger.exception("Failed to process message from topic %s", topic)
 

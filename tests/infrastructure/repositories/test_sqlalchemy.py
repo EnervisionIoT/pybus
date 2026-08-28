@@ -1,3 +1,4 @@
+import json
 import uuid
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -544,20 +545,20 @@ async def test_save_domain_events_leaves_tenant_id_null_without_a_tenant_context
     assert persisted_models[0].tenant_id is None
 
 
-async def test_save_domain_events_ignores_a_tenant_id_declared_on_the_event():
-    """The column records where the write happened, and the event does not
-    get a say in that.
+async def test_save_domain_events_keeps_a_tenant_id_the_event_already_declared():
+    """The session fills in, it does not overrule -- same as created_by_id.
 
-    An event may well carry its own tenant_id field -- and for events about
-    another tenant that value is deliberately different from the writing
-    context. Taking it from the event would put a value in the column that
-    the row-level security policy can never match, so the insert would fail
-    or the row would be invisible.
+    A service with no row-level security establishes no tenant context, so
+    the session has nothing to offer; its events declare their own tenant and
+    that is the only way the value reaches the wire at all. Where a service
+    does have a context and the two disagree, the insert is refused by the
+    policy's WITH CHECK -- a loud failure rather than a row filed under the
+    wrong tenant.
     """
-    writing_tenant = uuid.uuid4()
+    declared = uuid.uuid4()
     session = MagicMock()
     session.add_all = MagicMock()
-    session.info = {"tenant_id": writing_tenant}
+    session.info = {}
     repo = ThingRepository(session, correlation_id=uuid.uuid4())
 
     class TenantScopedEvent(DomainEvent):
@@ -565,11 +566,36 @@ async def test_save_domain_events_ignores_a_tenant_id_declared_on_the_event():
         tenant_id: uuid.UUID
 
     thing = DummyThing()
-    thing.register_event(TenantScopedEvent(aggregate_id=thing.id, tenant_id=uuid.uuid4()))
+    thing.register_event(TenantScopedEvent(aggregate_id=thing.id, tenant_id=declared))
     await repo.add(thing)
     await repo.save_domain_events()
 
     (persisted_models,), _ = session.add_all.call_args
-    assert persisted_models[0].tenant_id == writing_tenant
-    # ...and the event's own value still travels, in the payload.
-    assert "tenant_id" in persisted_models[0].payload
+    assert persisted_models[0].tenant_id == declared
+
+
+async def test_save_domain_events_puts_tenant_id_on_the_event_not_only_the_row():
+    """The column never travels; the envelope does.
+
+    A consumer has to establish a tenant context before it can write to
+    anything behind a policy, and all it receives is the serialized event --
+    so the value has to be on the event, not merely in the table.
+    """
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.add_all = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    repo = ThingRepository(session, correlation_id=uuid.uuid4())
+
+    thing = DummyThing()
+    event = make_dummy_event(aggregate_id=thing.id)
+    assert event.tenant_id is None
+    thing.register_event(event)
+    await repo.add(thing)
+
+    (saved_event,) = await repo.save_domain_events()
+
+    assert saved_event.tenant_id == tenant_id
+    assert json.loads(saved_event.model_dump_json())["tenant_id"] == str(tenant_id)
+    # ...and it is envelope, not content.
+    assert "tenant_id" not in saved_event.payload

@@ -15,6 +15,12 @@ class DomainEvent(TypeRegistryMixin):
     occurred_on: datetime = Field(default_factory=datetime.now, description="事件發生時間")
     version: int | None = Field(default=None, description="事件版本")
     created_by_id: uuid.UUID | None = Field(default=None, description="創建者 ID")
+    # 事件所屬的 tenant。信封欄位而非 payload 的一部分，因為消費端要靠它
+    # 建立 tenant context 才能寫入受 RLS 保護的表 —— 那是路由資訊，不是
+    # 事件內容。未設定時由 `save_domain_events` 從交易的 tenant context
+    # 補上，與 `created_by_id` 同一機制。需要它必填的服務可以在子類別
+    # 把型別收窄成 `uuid.UUID`。
+    tenant_id: uuid.UUID | None = Field(default=None, description="所屬 tenant ID")
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -29,5 +35,6 @@ class DomainEvent(TypeRegistryMixin):
                 "occurred_on",
                 "version",
                 "created_by_id",
+                "tenant_id",
             },
         )

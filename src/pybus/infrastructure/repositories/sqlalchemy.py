@@ -113,6 +113,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
                     "occurred_on": instance.occurred_on,
                     "version": instance.version,
                     "created_by_id": instance.created_by_id,
+                    "tenant_id": instance.tenant_id,
                     **instance.payload,
                 },
             )
@@ -202,18 +203,22 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         # as a parameter) means a future event that sets its own
         # `created_by_id` explicitly is never overwritten by this fallback.
         created_by_id = self._session.info.get("created_by_id")
-        # Same stash, same reason. Unlike `created_by_id` the event never
-        # gets a say in this one: the column records where the write
-        # happened, which is not the event's to claim.
+        # Same stash, same fallback semantics. Stamped onto the *event*, not
+        # only onto the row, so the value reaches Kafka too -- a consumer
+        # needs it to establish a tenant context before it can write to
+        # anything behind a row-level security policy, and the column never
+        # travels. Column and wire therefore always carry the same value.
         tenant_id = self._session.info.get("tenant_id")
         for domain_event in events:
             if domain_event.created_by_id is None and created_by_id is not None:
                 domain_event.created_by_id = created_by_id
+            if domain_event.tenant_id is None and tenant_id is not None:
+                domain_event.tenant_id = tenant_id
         self._session.add_all(
             [
                 DomainEventModel(
                     id=domain_event.id,
-                    tenant_id=tenant_id,
+                    tenant_id=domain_event.tenant_id,
                     correlation_id=self._correlation_id,
                     aggregate_id=domain_event.aggregate_id,
                     aggregate_type=domain_event.aggregate_type,

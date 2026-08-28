@@ -24,6 +24,10 @@ def test_payload_excludes_bookkeeping_fields():
         "occurred_on",
         "version",
         "created_by_id",
+        # Envelope, not content: a consumer needs it to establish a tenant
+        # context before it can write anything behind a policy, so it rides
+        # alongside the routing fields rather than inside the event body.
+        "tenant_id",
     ):
         assert field not in payload
 

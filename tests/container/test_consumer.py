@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 from confluent_kafka import KafkaError
@@ -191,3 +192,65 @@ async def test_run_event_consumer_closes_the_consumer_on_exit():
     await run_event_consumer(application, consumer, stop_event=stop_event)
 
     consumer.close.assert_awaited_once()
+
+
+async def test_run_event_consumer_dispatches_inside_the_events_tenant_context():
+    """Without this a handler behind a row-level security policy has no
+    context to write into: the insert is refused, the select comes back
+    empty, and nothing is raised to say why."""
+    tenant_id = uuid.uuid4()
+    event = ConsumerDummyEvent(
+        aggregate_id=uuid.uuid4(), aggregate_type="Dummy", value="hi", tenant_id=tenant_id
+    )
+    msg = _fake_message(value=json.dumps(event.model_dump(mode="json")).encode("utf-8"))
+
+    consumer = MagicMock(spec=AIOConsumer)
+    consumer.subscribe = AsyncMock()
+    consumer.close = AsyncMock()
+    consumer.commit = AsyncMock()
+    calls = {"n": 0}
+
+    async def fake_poll(timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return msg
+        stop_event.set()
+        return None
+
+    consumer.poll = fake_poll
+    application = MagicMock(spec=Application)
+    application.execute = AsyncMock()
+    stop_event = asyncio.Event()
+
+    await run_event_consumer(application, consumer, stop_event=stop_event, poll_timeout=0.01)
+
+    assert application.execute.call_args.kwargs["tenant_id"] == tenant_id
+
+
+async def test_run_event_consumer_passes_no_tenant_when_the_event_carries_none():
+    """A service with no tenants is the normal case for this, and `execute`
+    already treats None as "do not set a context"."""
+    event = ConsumerDummyEvent(aggregate_id=uuid.uuid4(), aggregate_type="Dummy", value="hi")
+    msg = _fake_message(value=json.dumps(event.model_dump(mode="json")).encode("utf-8"))
+
+    consumer = MagicMock(spec=AIOConsumer)
+    consumer.subscribe = AsyncMock()
+    consumer.close = AsyncMock()
+    consumer.commit = AsyncMock()
+    calls = {"n": 0}
+
+    async def fake_poll(timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return msg
+        stop_event.set()
+        return None
+
+    consumer.poll = fake_poll
+    application = MagicMock(spec=Application)
+    application.execute = AsyncMock()
+    stop_event = asyncio.Event()
+
+    await run_event_consumer(application, consumer, stop_event=stop_event, poll_timeout=0.01)
+
+    assert application.execute.call_args.kwargs["tenant_id"] is None
