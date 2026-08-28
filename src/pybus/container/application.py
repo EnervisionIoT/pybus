@@ -1,6 +1,7 @@
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import partial
+from logging import Logger
 from typing import Any, overload
 
 from confluent_kafka.aio import AIOConsumer, AIOProducer
@@ -31,23 +32,57 @@ def create_application(
 
     @application.on_enter_transaction_context
     async def on_enter_transaction_context(context: TransactionContext) -> None:  # pyright: ignore[reportUnusedFunction]
-        context.set_dependency("publish_event", context.publish_event)
+        # Bound to `enqueue_event`, not `publish_event`, deliberately. A
+        # handler that injected this and produced directly would produce from
+        # inside the transaction, which is exactly the ordering the exit hook
+        # below exists to prevent. Nothing injects it today; binding it to the
+        # buffer means nothing can.
+        context.set_dependency("publish_event", context.enqueue_event)
 
     @application.on_exit_transaction_context
     async def on_exit_transaction_context(  # pyright: ignore[reportUnusedFunction]
         context: TransactionContext, exc_val: BaseException | None
     ) -> None:
         session = context.get_dependency(DataBaseSession)
-        if exc_val:
-            await session.rollback()
-        else:
+        logger = context.get_dependency(Logger)
+
+        try:
+            if exc_val:
+                await session.rollback()
+                # Buffered events are simply never taken. Nothing that failed
+                # to commit is allowed onto the topic.
+                return
             await session.commit()
-        await session.close()
+        finally:
+            await session.close()
+
+        # Past here the write is durable and cannot be taken back, so a
+        # produce failure is not something the caller can act on. Raising
+        # would report a committed command as failed and invite a retry that
+        # writes it twice. Log and carry on: the row is in `domain_events`,
+        # which is the record a replay would work from.
+        for domain_event in context.take_pending_events():
+            try:
+                await context.publish_event(domain_event)
+            except Exception:
+                logger.exception(
+                    "Transaction committed but publishing %s (id=%s) failed. "
+                    "The row is in domain_events; the message is not on the topic.",
+                    domain_event.message_type,
+                    domain_event.id,
+                )
 
     @application.transaction_middleware
     async def event_collector_middleware(  # pyright: ignore[reportUnusedFunction]
         context: TransactionContext, call_next: Callable[[], Awaitable[Any]]
     ) -> Any:
+        """Write the outbox rows and buffer what to publish -- but publish
+        nothing.
+
+        This used to produce to Kafka right here. A produce could succeed and
+        the transaction then roll back in `on_exit_transaction_context`,
+        leaving the broker holding an event the database never recorded.
+        """
         result = await call_next()
 
         if isinstance(call_next, partial):
@@ -57,14 +92,13 @@ def create_application(
                 if isinstance(dependency, GenericRepository)
             ]
 
-            domain_events = [
-                domain_event
-                for repository_dependency in repository_dependencies
-                for domain_event in await repository_dependency.save_domain_events()
-            ]
-
-            for domain_event in domain_events:
-                await context.publish_event(domain_event)
+            # `save_domain_events()` stays here, inside the transaction: it
+            # is destructive (it drains each aggregate's pending events) and
+            # its INSERTs belong to this unit of work. Only the Kafka produce
+            # moves -- see `TransactionContext.enqueue_event`.
+            for repository_dependency in repository_dependencies:
+                for domain_event in await repository_dependency.save_domain_events():
+                    await context.enqueue_event(domain_event)
 
         return result
 

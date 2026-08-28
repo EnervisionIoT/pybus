@@ -47,16 +47,22 @@ def test_create_application_includes_given_modules():
     assert sub_module in app._sub_modules
 
 
-async def test_on_enter_hook_sets_publish_event_as_a_string_dependency():
+async def test_on_enter_hook_binds_publish_event_to_the_buffer():
+    """The injectable dependency is `enqueue_event`, not `publish_event`.
+
+    A handler that injected this and produced directly would produce from
+    inside the transaction -- the exact ordering the exit hook exists to
+    prevent. Binding it to the buffer means it cannot.
+    """
     app = build_application()
     fake_context = MagicMock()
     fake_context.set_dependency = MagicMock()
-    fake_context.publish_event = AsyncMock()
+    fake_context.enqueue_event = AsyncMock()
 
     assert app._on_enter_transaction_context is not None
     await app._on_enter_transaction_context(fake_context)
 
-    fake_context.set_dependency.assert_called_once_with("publish_event", fake_context.publish_event)
+    fake_context.set_dependency.assert_called_once_with("publish_event", fake_context.enqueue_event)
 
 
 async def test_on_exit_hook_commits_and_closes_when_no_exception():
@@ -87,7 +93,14 @@ async def test_on_exit_hook_rolls_back_and_closes_on_exception():
     session.close.assert_awaited_once()
 
 
-async def test_event_collector_middleware_publishes_domain_events_from_repository_kwargs():
+async def test_event_collector_middleware_buffers_instead_of_publishing():
+    """The regression guard for publish-before-commit.
+
+    The middleware runs inside the transaction, so anything it produces can
+    still be rolled back out from under. It writes the outbox rows and hands
+    the events to the buffer; the exit hook publishes them once the commit
+    has returned.
+    """
     app = build_application()
     middleware = app._transaction_middleware[0]
 
@@ -101,13 +114,15 @@ async def test_event_collector_middleware_publishes_domain_events_from_repositor
     call_next = partial(handler, repo=fake_repo)
 
     fake_context = MagicMock()
+    fake_context.enqueue_event = AsyncMock()
     fake_context.publish_event = AsyncMock()
 
     result = await middleware(fake_context, call_next)
 
     assert result == "handler-result"
     fake_repo.save_domain_events.assert_awaited_once()
-    fake_context.publish_event.assert_awaited_once_with(event)
+    fake_context.enqueue_event.assert_awaited_once_with(event)
+    fake_context.publish_event.assert_not_awaited()
 
 
 async def test_event_collector_middleware_ignores_non_repository_kwargs():
@@ -120,12 +135,12 @@ async def test_event_collector_middleware_ignores_non_repository_kwargs():
     call_next = partial(handler, command=DoThing())
 
     fake_context = MagicMock()
-    fake_context.publish_event = AsyncMock()
+    fake_context.enqueue_event = AsyncMock()
 
     result = await middleware(fake_context, call_next)
 
     assert result == "handler-result"
-    fake_context.publish_event.assert_not_called()
+    fake_context.enqueue_event.assert_not_called()
 
 
 class FakeTransactionContext:
@@ -453,3 +468,98 @@ async def test_kafka_consumer_provider_resolves_to_an_aio_consumer():
 def test_kafka_consumer_group_id_setting_has_a_default():
     settings = ApplicationSettings()
     assert settings.KAFKA_CONSUMER_GROUP_ID == "pybus"
+
+
+class OrderRecorder:
+    """Records commit/rollback/close/publish in the order they happen.
+
+    The regression being guarded is purely about *order*: every call the old
+    code made, the new code also makes. Only a recorder spanning both the
+    session and the publish path can tell the two apart.
+    """
+
+    def __init__(self, events=(), commit_error=None, publish_error=None):
+        self.calls: list[str] = []
+        self._events = list(events)
+        self._commit_error = commit_error
+        self._publish_error = publish_error
+        self.logger = MagicMock(spec=logging.Logger)
+
+        self.session = AsyncMock()
+        self.session.commit.side_effect = self._commit
+        self.session.rollback.side_effect = lambda: self.calls.append("rollback")
+        self.session.close.side_effect = lambda: self.calls.append("close")
+
+    def _commit(self):
+        self.calls.append("commit")
+        if self._commit_error:
+            raise self._commit_error
+
+    def get_dependency(self, identifier):
+        return self.logger if identifier is logging.Logger else self.session
+
+    def take_pending_events(self):
+        self.calls.append("take")
+        return list(self._events)
+
+    async def publish_event(self, message):
+        self.calls.append(f"publish:{message.message_type}")
+        if self._publish_error:
+            raise self._publish_error
+
+
+async def test_on_exit_hook_publishes_only_after_the_commit_returns():
+    """The whole point of the change: nothing reaches Kafka until the write
+    is durable."""
+    app = build_application()
+    recorder = OrderRecorder(events=[make_dummy_event()])
+
+    assert app._on_exit_transaction_context is not None
+    await app._on_exit_transaction_context(recorder, None)
+
+    assert recorder.calls == ["commit", "close", "take", "publish:DummyEvent"]
+
+
+async def test_on_exit_hook_publishes_nothing_when_the_commit_fails():
+    """The bug, stated directly.
+
+    Before this change the produce had already happened by the time the
+    commit ran, so a failing commit left the broker holding an event whose
+    row does not exist.
+    """
+    app = build_application()
+    recorder = OrderRecorder(events=[make_dummy_event()], commit_error=RuntimeError("boom"))
+
+    assert app._on_exit_transaction_context is not None
+    with pytest.raises(RuntimeError):
+        await app._on_exit_transaction_context(recorder, None)
+
+    assert "close" in recorder.calls
+    assert not [call for call in recorder.calls if call.startswith("publish")]
+
+
+async def test_on_exit_hook_publishes_nothing_when_the_transaction_rolled_back():
+    app = build_application()
+    recorder = OrderRecorder(events=[make_dummy_event()])
+
+    assert app._on_exit_transaction_context is not None
+    await app._on_exit_transaction_context(recorder, ValueError("handler blew up"))
+
+    assert recorder.calls == ["rollback", "close"]
+
+
+async def test_on_exit_hook_logs_and_continues_when_a_produce_fails():
+    """A produce failure after the commit cannot undo the write, so raising
+    would report a committed command as failed and invite a retry that
+    writes it twice."""
+    app = build_application()
+    recorder = OrderRecorder(
+        events=[make_dummy_event(), make_dummy_event()],
+        publish_error=RuntimeError("broker down"),
+    )
+
+    assert app._on_exit_transaction_context is not None
+    await app._on_exit_transaction_context(recorder, None)
+
+    assert recorder.calls.count("publish:DummyEvent") == 2
+    assert recorder.logger.exception.call_count == 2

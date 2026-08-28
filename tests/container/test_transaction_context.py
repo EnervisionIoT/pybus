@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -325,3 +326,67 @@ async def test_publish_event_produces_to_kafka_with_correlation_id_set():
     _, kwargs = fake_producer.produce.call_args
     assert kwargs["topic"] == TransactionContext.DOMAIN_EVENTS_TOPIC
     assert kwargs["key"] == str(event.aggregate_id).encode("utf-8")
+
+
+async def test_enqueue_event_buffers_without_producing():
+    """The collector middleware runs inside the transaction, so anything it
+    produced could still be rolled back out from under. It enqueues."""
+    fake_producer = MagicMock(spec=AIOProducer)
+    fake_producer.produce = AsyncMock()
+
+    class C(containers.DeclarativeContainer):
+        correlation_id = providers.Dependency(instance_of=uuid.UUID)
+        kafka_producer_dep = providers.Dependency(instance_of=AIOProducer)
+
+    ctx = make_context(C(correlation_id=uuid.uuid4(), kafka_producer_dep=fake_producer))
+    event = make_dummy_event()
+
+    await ctx.enqueue_event(event)
+
+    fake_producer.produce.assert_not_awaited()
+    assert ctx.take_pending_events() == [event]
+
+
+async def test_take_pending_events_drains_the_buffer():
+    """Swap-and-return, like AggregateRoot.collect_events: a second call must
+    not re-publish what the first already handed over."""
+    ctx = make_context(MagicMock())
+
+    await ctx.enqueue_event(make_dummy_event())
+
+    assert len(ctx.take_pending_events()) == 1
+    assert ctx.take_pending_events() == []
+
+
+async def test_two_contexts_do_not_share_a_buffer():
+    """The buffer is per-transaction. Two concurrent transactions publishing
+    each other's events would be worse than the bug being fixed."""
+    first = make_context(MagicMock())
+    second = make_context(MagicMock())
+
+    await first.enqueue_event(make_dummy_event())
+
+    assert second.take_pending_events() == []
+    assert len(first.take_pending_events()) == 1
+
+
+async def test_a_buffered_event_still_carries_the_transactions_correlation_id():
+    """Deferring the produce must not break the tie between the Kafka message
+    and the domain_events row, which is stamped from the same provider."""
+    correlation_id = uuid.uuid4()
+    fake_producer = MagicMock(spec=AIOProducer)
+    fake_producer.produce = AsyncMock()
+
+    class C(containers.DeclarativeContainer):
+        correlation_id = providers.Dependency(instance_of=uuid.UUID)
+        kafka_producer_dep = providers.Dependency(instance_of=AIOProducer)
+
+    ctx = make_context(C(correlation_id=correlation_id, kafka_producer_dep=fake_producer))
+
+    await ctx.enqueue_event(make_dummy_event())
+    for event in ctx.take_pending_events():
+        await ctx.publish_event(event)
+
+    fake_producer.produce.assert_awaited_once()
+    _, kwargs = fake_producer.produce.call_args
+    assert json.loads(kwargs["value"])["correlation_id"] == str(correlation_id)

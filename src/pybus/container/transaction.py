@@ -82,6 +82,7 @@ class TransactionContext:
 
     def __init__(self, dependency_provider: DependencyProvider):
         self._dependency_provider: DependencyProvider = dependency_provider
+        self._pending_events: list[DomainEvent] = []
 
         self._on_enter_transaction_context: (
             Callable[["TransactionContext"], Awaitable[None]] | None
@@ -287,7 +288,52 @@ class TransactionContext:
             )
             raise
 
+    async def enqueue_event(self, message: DomainEvent) -> None:
+        """Hold `message` until the transaction has actually committed.
+
+        The event-collector middleware runs *inside* the transaction -- it
+        wraps the handler call, which is several frames inside the
+        `async with` in `Application.execute`. Producing from there means
+        Kafka can end up holding an event whose row the commit then refused:
+        the message is on the topic, the write is not in the database, and a
+        consumer acts on something that did not happen.
+
+        So the collector buffers here, and the on-exit hook drains the buffer
+        after `session.commit()` has returned.
+
+        The buffer lives on the context rather than in the dependency
+        container because the context is already the one object both ends
+        provably share: `call()` passes `self` to every middleware, and
+        `__aexit__` passes the same `self` to the exit hook.
+
+        `async` despite awaiting nothing: this is what the on-enter hook binds
+        the injectable `"publish_event"` dependency to, and that has always
+        been awaitable. Making it sync would break any handler that writes
+        `await publish_event(...)`.
+        """
+        self._pending_events.append(message)
+
+    def take_pending_events(self) -> list[DomainEvent]:
+        """Hand over everything buffered, and empty the buffer.
+
+        Swap-and-return, the same idiom as `AggregateRoot.collect_events()`:
+        draining is the point, so a second call cannot re-publish.
+        """
+        pending, self._pending_events = self._pending_events, []
+        return pending
+
     async def publish_event(self, message: DomainEvent) -> None:
+        """Produce one event to Kafka. Only the on-exit hook should call this,
+        and only after the commit has returned -- see `enqueue_event`.
+
+        Note what `AIOProducer.produce` actually does: it appends to an
+        in-process batch and returns a future that resolves on delivery,
+        which this discards. The batch flushes at 1000 messages or after a
+        second of inactivity. So "published" here means "handed to the
+        client library", not "acknowledged by a broker" -- a separate gap
+        from the one `enqueue_event` closes, and one that only an outbox
+        relay reading committed rows can close properly.
+        """
         kafka_producer = self.get_dependency(AIOProducer)
         correlation_id: uuid.UUID = self.get_dependency("correlation_id")
 
