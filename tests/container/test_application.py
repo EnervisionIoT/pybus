@@ -470,6 +470,33 @@ def test_kafka_consumer_group_id_setting_has_a_default():
     assert settings.KAFKA_CONSUMER_GROUP_ID == "pybus"
 
 
+def test_the_consumer_starts_from_the_beginning_not_the_end():
+    """librdkafka's own default is `latest`, and it loses events silently.
+
+    A group with no committed offset -- a first start, a renamed group, a
+    restart after Kafka's offset retention expired -- would begin at the end
+    of the partition and skip everything already there. No error, no log
+    line, and `kafka-consumer-groups --describe` reports no lag, because as
+    far as the group is concerned there is nothing behind it.
+
+    This was found by starting the platform in containers for the first
+    time: idp committed a `UserInvited` row, produced it, and iam never
+    built the membership. Asserted on the configuration rather than through
+    a broker because the value is the whole of the fix.
+    """
+    settings = ApplicationSettings(KAFKA_BOOTSTRAP_SERVERS="localhost:9092")
+    container = ApplicationContainer()
+    container.config.override(settings)
+
+    conf = container.kafka_consumer.kwargs["consumer_conf"]()
+
+    assert conf["auto.offset.reset"] == "earliest"
+    # Together these are what make delivery at-least-once: the offset moves
+    # only after a message has been handled, and a group that has never
+    # committed one starts from the beginning rather than skipping ahead.
+    assert conf["enable.auto.commit"] is False
+
+
 class OrderRecorder:
     """Records commit/rollback/close/publish in the order they happen.
 

@@ -34,6 +34,15 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.9",
+    # The same two the `sqlalchemy` extra carries, repeated here because the
+    # test suite cannot run without them: `pybus.container.application`
+    # imports sqlalchemy unconditionally, so the extra is optional to a
+    # consumer and mandatory to this repository's own tests. `uv sync &&
+    # uv run pytest` failed outright in a fresh clone until this was added
+    # -- it only ever worked because the workspace this package used to live
+    # in had a consumer that pulled the extra in.
+    "pgvector>=0.4.2",
+    "sqlalchemy>=2.0.49",
 ]
 
 [tool.pytest.ini_options]

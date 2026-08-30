@@ -178,6 +178,25 @@ class ApplicationContainer(containers.DeclarativeContainer):
                 "bootstrap.servers": config.provided.KAFKA_BOOTSTRAP_SERVERS,
                 "group.id": config.provided.KAFKA_CONSUMER_GROUP_ID,
                 "enable.auto.commit": False,
+                # librdkafka defaults this to `latest`, which loses events
+                # silently. A group with no committed offset -- a first
+                # start, a renamed group, a restart after Kafka's offset
+                # retention expired -- would begin at the end of the
+                # partition, so everything already sitting there is skipped
+                # with no error, no log line and no lag reported.
+                #
+                # That is not survivable for a domain-event outbox: the
+                # producer committed its rows and considers the fact
+                # published. `earliest` means such a group instead replays
+                # what the topic still holds, which handlers must already
+                # tolerate -- delivery is at-least-once, so they are
+                # idempotent by contract, and a replay is only a longer
+                # redelivery.
+                #
+                # The cost is real and is the lesser one: a brand-new
+                # consumer group in an established system works through the
+                # retained history before it catches up.
+                "auto.offset.reset": "earliest",
             }
         ),
     )
