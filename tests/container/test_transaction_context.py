@@ -226,6 +226,89 @@ async def test_execute_command_logs_and_reraises_handler_exception():
     logger.error.assert_called_once()
 
 
+class Secretive(Command[None]):
+    """Shaped like the real ones: a harmless field and a dangerous one.
+
+    `LoginCommand` carries a password, `ChangePasswordCommand` two of them,
+    `AcceptInvitationCommand` a password and an invitation token, and every
+    token-verifying message an access token.
+    """
+
+    email: str = "somebody@example.test"
+    password: str = "hunter2-and-then-some"
+
+
+class SecretiveQuery(Query[None]):
+    email: str = "somebody@example.test"
+    password: str = "hunter2-and-then-some"
+
+
+class SecretiveEvent(DomainEvent):
+    aggregate_type: str = "Secret"
+
+    email: str = "somebody@example.test"
+    password: str = "hunter2-and-then-some"
+
+
+async def test_a_failed_message_is_named_in_the_log_but_never_printed():
+    """The log line used to interpolate the whole pydantic model.
+
+    So a failed sign-in wrote the attempted password, in plaintext, to the
+    application log -- one layer below idp's own interceptor, which refuses
+    to log even the email for exactly this reason. Found by reading the
+    output of a failed login against the running stack.
+
+    Asserted on every message kind, because all three took the same shape of
+    line and a fix to one of them proves nothing about the others.
+    """
+
+    # Annotated per message type: pybus resolves a handler's parameters from
+    # its type hints, so an unannotated one is called with no arguments at
+    # all and the test fails for the wrong reason.
+    async def fail_command(message: Secretive) -> None:
+        raise ValueError("handler blew up")
+
+    async def fail_query(message: SecretiveQuery) -> None:
+        raise ValueError("handler blew up")
+
+    async def fail_event(message: SecretiveEvent) -> None:
+        raise ValueError("handler blew up")
+
+    for execute, message, handler in (
+        ("execute_command", Secretive(), fail_command),
+        ("execute_query", SecretiveQuery(), fail_query),
+        ("execute_event", SecretiveEvent(aggregate_id=uuid.uuid4()), fail_event),
+    ):
+        logger = MagicMock(spec=logging.Logger)
+        ctx = make_context(container_with_logger(logger))
+        ctx.configure(handlers_iterator=lambda _m, h=handler: iter([h]))
+
+        with pytest.raises(ValueError):
+            await getattr(ctx, execute)(message)
+
+        logged = " ".join(str(arg) for arg in logger.error.call_args.args)
+        assert "hunter2-and-then-some" not in logged, f"{execute} leaked the password"
+        assert "somebody@example.test" not in logged, f"{execute} leaked the address"
+        # Still useful: which message, and the id that ties it to the outbox
+        # row and to every other line the same unit of work produced.
+        assert type(message).__name__ in logged
+        assert str(message.id) in logged
+
+
+async def test_no_handler_found_does_not_print_the_message_either():
+    """That message becomes an exception, and an exception becomes a log
+    line somewhere upstream -- the interceptors all log what they could not
+    map. Same leak by a longer route."""
+    ctx = make_context(container_with_logger(MagicMock(spec=logging.Logger)))
+    ctx.configure(handlers_iterator=no_handlers)
+
+    with pytest.raises(Exception, match="No handler found") as excinfo:
+        await ctx.execute_command(Secretive())
+
+    assert "hunter2-and-then-some" not in str(excinfo.value)
+    assert "Secretive" in str(excinfo.value)
+
+
 async def test_execute_query_calls_the_first_handler_and_returns_its_result():
     ctx = make_context()
 

@@ -24,6 +24,31 @@ class TransactionContainer(containers.DeclarativeContainer):
     logger: providers.Provider[Logger] = providers.Dependency(instance_of=Logger)
 
 
+def _describe(message: Any) -> str:
+    """Name a message for a log line, without printing what it carries.
+
+    These are pydantic models, so interpolating one renders every field it
+    has. That put plaintext credentials in the logs: a failed `LoginCommand`
+    wrote the attempted password, a failed `ChangePasswordCommand` wrote both
+    the old and the new one, and any failed message carrying an access or
+    invitation token wrote the token. idp's own gRPC interceptor refuses to
+    log the email a sign-in was attempted with, on the grounds that an
+    authentication log full of credentials is a second copy of the
+    credential store -- and this line, one layer beneath it, was writing the
+    password.
+
+    The type and the id are enough to find the rest: the id is on the outbox
+    row and on every other line the same unit of work produced.
+
+    Deliberately not an allowlist of fields that are safe to print. Such a
+    list is correct only until somebody adds a field, and the failure is
+    silent and retroactive -- every log already written keeps the secret in
+    it. Naming the message and nothing else is the only rule that survives a
+    schema nobody reviewed for this.
+    """
+    return f"{type(message).__name__} id={getattr(message, 'id', '?')}"
+
+
 def _is_subclass_safe(candidate: Any, target: type) -> bool:
     """issubclass(candidate, target) but tolerant of `target` being a
     @runtime_checkable Protocol with non-method members: CPython's typing
@@ -240,11 +265,11 @@ class TransactionContext:
                 return await self.call(handler, command)
         except Exception as ex:
             self._dependency_provider.get_dependency(Logger).error(
-                f"Executing command {command} failed with error: {ex}"
+                f"Executing {_describe(command)} failed with error: {ex}"
             )
             raise
 
-        raise Exception(f"No handler found for command: {command}")
+        raise Exception(f"No handler found for command: {_describe(command)}")
 
     @overload
     async def execute_query[TResult](
@@ -269,11 +294,11 @@ class TransactionContext:
                 return await self.call(handler, query, pagination)
         except Exception as ex:
             self._dependency_provider.get_dependency(Logger).error(
-                f"Executing query {query} failed with error: {ex}"
+                f"Executing {_describe(query)} failed with error: {ex}"
             )
             raise
 
-        raise Exception(f"No handler found for query: {query}")
+        raise Exception(f"No handler found for query: {_describe(query)}")
 
     async def execute_event(self, event: DomainEvent) -> None:
         if self._handlers_iterator is None:
@@ -284,7 +309,7 @@ class TransactionContext:
                 await self.call(handler, event)
         except Exception as ex:
             self._dependency_provider.get_dependency(Logger).error(
-                f"Executing event {event} failed with error: {ex}"
+                f"Executing {_describe(event)} failed with error: {ex}"
             )
             raise
 
