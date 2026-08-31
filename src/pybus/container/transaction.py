@@ -11,6 +11,7 @@ from confluent_kafka.aio import AIOProducer
 from dependency_injector import containers, providers
 
 from pybus.application.commands import Command
+from pybus.application.common.exceptions import NoHandlerFound
 from pybus.application.common.pagination import PaginationQuery
 from pybus.application.queries import Query
 from pybus.domain.events import DomainEvent
@@ -110,14 +111,14 @@ class TransactionContext:
         self._pending_events: list[DomainEvent] = []
 
         self._on_enter_transaction_context: (
-            Callable[["TransactionContext"], Awaitable[None]] | None
+            Callable[[TransactionContext], Awaitable[None]] | None
         ) = None
         self._on_publish_scheduled_event: Callable[[DomainEvent], Awaitable[None]] | None = None
         self._on_exit_transaction_context: (
-            Callable[["TransactionContext", BaseException | None], Awaitable[None]] | None
+            Callable[[TransactionContext, BaseException | None], Awaitable[None]] | None
         ) = None
         self._middlewares: list[
-            Callable[["TransactionContext", Callable[[], Awaitable[Any]]], Awaitable[Any]]
+            Callable[[TransactionContext, Callable[[], Awaitable[Any]]], Awaitable[Any]]
         ] = []
         self._handlers_iterator: (
             Callable[
@@ -269,7 +270,7 @@ class TransactionContext:
             )
             raise
 
-        raise Exception(f"No handler found for command: {_describe(command)}")
+        raise NoHandlerFound(f"No handler found for command: {_describe(command)}")
 
     @overload
     async def execute_query[TResult](
@@ -298,7 +299,7 @@ class TransactionContext:
             )
             raise
 
-        raise Exception(f"No handler found for query: {_describe(query)}")
+        raise NoHandlerFound(f"No handler found for query: {_describe(query)}")
 
     async def execute_event(self, event: DomainEvent) -> None:
         if self._handlers_iterator is None:

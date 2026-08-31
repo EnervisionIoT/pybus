@@ -1,7 +1,6 @@
 import pytest
 
 from pybus.infrastructure.repositories.memory import InMemoryRepository
-
 from tests.conftest import DummyThing, make_dummy_event
 
 
@@ -40,7 +39,7 @@ async def test_get_all_without_pagination_returns_list(repo: InMemoryRepository)
 
     result = await repo.get_all()
 
-    assert set(e.id for e in result) == {a.id, b.id}
+    assert {e.id for e in result} == {a.id, b.id}
 
 
 async def test_get_all_with_pagination_returns_total_and_page(repo: InMemoryRepository):
@@ -111,7 +110,7 @@ async def test_collect_events_gathers_from_all_aggregate_roots(repo: InMemoryRep
 
     events = await repo.collect_events()
 
-    assert set(e.id for e in events) == {event1.id, event2.id}
+    assert {e.id for e in events} == {event1.id, event2.id}
 
 
 async def test_save_domain_events_gathers_from_all_aggregate_roots(repo: InMemoryRepository):

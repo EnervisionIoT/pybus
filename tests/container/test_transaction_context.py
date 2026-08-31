@@ -9,11 +9,11 @@ from confluent_kafka.aio import AIOProducer
 from dependency_injector import containers, providers
 
 from pybus.application.commands import Command
+from pybus.application.common.exceptions import NoHandlerFound
 from pybus.application.common.pagination import PaginationQuery
 from pybus.application.queries import Query
 from pybus.container.transaction import DependencyProvider, TransactionContext
 from pybus.domain.events import DomainEvent
-
 from tests.conftest import make_dummy_event
 
 
@@ -207,7 +207,7 @@ async def test_execute_command_raises_when_no_handler_found():
     ctx = make_context(container_with_logger(logger))
     ctx.configure(handlers_iterator=no_handlers)
 
-    with pytest.raises(Exception, match="No handler found"):
+    with pytest.raises(NoHandlerFound, match="No handler found"):
         await ctx.execute_command(DoThing())
 
 
@@ -302,7 +302,7 @@ async def test_no_handler_found_does_not_print_the_message_either():
     ctx = make_context(container_with_logger(MagicMock(spec=logging.Logger)))
     ctx.configure(handlers_iterator=no_handlers)
 
-    with pytest.raises(Exception, match="No handler found") as excinfo:
+    with pytest.raises(NoHandlerFound, match="No handler found") as excinfo:
         await ctx.execute_command(Secretive())
 
     assert "hunter2-and-then-some" not in str(excinfo.value)
@@ -327,7 +327,7 @@ async def test_execute_query_raises_when_no_handler_found():
     ctx = make_context(container_with_logger(logger))
     ctx.configure(handlers_iterator=no_handlers)
 
-    with pytest.raises(Exception, match="No handler found"):
+    with pytest.raises(NoHandlerFound, match="No handler found"):
         await ctx.execute_query(GetThing())
 
 

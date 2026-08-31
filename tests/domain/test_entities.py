@@ -1,5 +1,4 @@
 from pybus.domain.entities import Entity
-
 from tests.conftest import DummyCounter, DummyThing, make_dummy_event
 
 

@@ -102,7 +102,6 @@ async def test_run_event_consumer_skips_none_polls_without_erroring():
         calls["n"] += 1
         if calls["n"] >= 3:
             stop_event.set()
-        return None
 
     consumer.poll = fake_poll
     application = MagicMock(spec=Application)

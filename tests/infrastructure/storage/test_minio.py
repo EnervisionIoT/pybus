@@ -5,7 +5,7 @@ import pytest
 from minio.error import S3Error
 
 from pybus.domain.value_objects import FileObject
-from pybus.infrastructure.storage.minio import Minio
+from pybus.infrastructure.storage.minio import FileNotFound, Minio
 
 
 @pytest.fixture
@@ -65,15 +65,32 @@ def test_check_file_exists_creates_bucket_then_returns_true_on_success(
     mock_client.make_bucket.assert_called_once_with(bucket_name="bucket")
 
 
-def test_check_file_exists_returns_false_when_stat_object_raises(
-    storage: Minio, mock_client: MagicMock
+@pytest.mark.parametrize("code", ["NoSuchKey", "NoSuchBucket"])
+def test_check_file_exists_returns_false_when_the_object_is_missing(
+    storage: Minio, mock_client: MagicMock, code: str
 ):
     mock_client.bucket_exists.return_value = True
-    mock_client.stat_object.side_effect = Exception("not found")
+    mock_client.stat_object.side_effect = make_s3_error(code)
 
-    result = storage.check_file_exists("bucket", "path/file.txt")
+    assert storage.check_file_exists("bucket", "path/file.txt") is False
 
-    assert result is False
+
+def test_check_file_exists_does_not_report_a_broken_backend_as_absence(
+    storage: Minio, mock_client: MagicMock
+):
+    """The previous version caught everything and answered False.
+
+    So an unreachable MinIO, an expired credential and a denied bucket
+    policy all came back as "that file is not there" -- which a caller
+    deciding whether to upload reads as permission to overwrite, and a
+    caller checking before a read reads as a clean absence. Only a miss is
+    an absence; a failure has to propagate.
+    """
+    mock_client.bucket_exists.return_value = True
+    mock_client.stat_object.side_effect = make_s3_error("AccessDenied")
+
+    with pytest.raises(S3Error):
+        storage.check_file_exists("bucket", "path/file.txt")
 
 
 def test_get_file_builds_file_object_from_response(storage: Minio, mock_client: MagicMock):
@@ -93,20 +110,29 @@ def test_get_file_builds_file_object_from_response(storage: Minio, mock_client: 
     response.release_conn.assert_called_once()
 
 
-def test_get_file_raises_wrapped_exception_for_no_such_key(storage: Minio, mock_client: MagicMock):
-    mock_client.get_object.side_effect = make_s3_error("NoSuchKey")
-
-    with pytest.raises(Exception, match="File not found"):
-        storage.get_file("bucket", "missing.txt")
-
-
-def test_get_file_raises_wrapped_exception_for_no_such_bucket(
-    storage: Minio, mock_client: MagicMock
+@pytest.mark.parametrize("code", ["NoSuchKey", "NoSuchBucket"])
+def test_get_file_raises_file_not_found_when_the_object_is_missing(
+    storage: Minio, mock_client: MagicMock, code: str
 ):
-    mock_client.get_object.side_effect = make_s3_error("NoSuchBucket")
+    """`FileNotFound`, not a bare `Exception`.
 
-    with pytest.raises(Exception, match="File not found"):
+    The class name is what decides the answer a caller gets: both services'
+    interceptors map anything ending in `NotFound` to gRPC `NOT_FOUND` by
+    name. As a bare Exception this became `INTERNAL` -- the server claiming
+    it had broken, about a file the caller had simply asked for and which
+    is not there.
+    """
+    mock_client.get_object.side_effect = make_s3_error(code)
+
+    with pytest.raises(FileNotFound, match="bucket/missing.txt"):
         storage.get_file("bucket", "missing.txt")
+
+
+def test_file_not_found_is_named_so_the_interceptors_map_it():
+    """Asserted rather than left to the name staying put. The mapping is by
+    string suffix and nothing imports this class, so a rename would move a
+    404 to a 500 with no test and no compiler noticing."""
+    assert FileNotFound.__name__.endswith("NotFound")
 
 
 def test_get_file_reraises_other_s3_errors(storage: Minio, mock_client: MagicMock):

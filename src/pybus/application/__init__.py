@@ -1,6 +1,6 @@
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Awaitable, Generator
-from typing import Any, Callable, overload
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from typing import Any, overload
 
 from pybus.domain.events import DomainEvent
 
@@ -15,7 +15,7 @@ class ApplicationModule:
             type[Command[Any] | DomainEvent | Query[Any]],
             set[Callable[..., Awaitable[None] | Awaitable[Any]]],
         ] = defaultdict(set)
-        self._sub_modules: set["ApplicationModule"] = set()
+        self._sub_modules: set[ApplicationModule] = set()
         self._dependencies: dict[
             type[Any], Callable[..., Awaitable[Any] | AsyncGenerator[Any]]
         ] = {}
@@ -37,25 +37,21 @@ class ApplicationModule:
     @overload
     def _iterate_handlers[TResult](
         self, message: Command[TResult]
-    ) -> Generator[Callable[..., Awaitable[None]], None, None]: ...
+    ) -> Generator[Callable[..., Awaitable[None]]]: ...
 
     @overload
     def _iterate_handlers[TResult](
         self, message: Query[TResult]
-    ) -> Generator[Callable[..., Awaitable[TResult]], None, None]: ...
+    ) -> Generator[Callable[..., Awaitable[TResult]]]: ...
 
     @overload
     def _iterate_handlers(
         self, message: DomainEvent
-    ) -> Generator[Callable[..., Awaitable[None]], None, None]: ...
+    ) -> Generator[Callable[..., Awaitable[None]]]: ...
 
     def _iterate_handlers[TResult](
         self, message: Command[TResult] | Query[TResult] | DomainEvent
-    ) -> Generator[
-        Callable[..., Awaitable[None]] | Callable[..., Awaitable[TResult]],
-        None,
-        None,
-    ]:
+    ) -> Generator[Callable[..., Awaitable[None]] | Callable[..., Awaitable[TResult]]]:
         if type(message) in self._handlers:
             yield from self._handlers[type(message)]
 
@@ -64,7 +60,7 @@ class ApplicationModule:
 
     def get_handlers[TResult](
         self, message: Command[TResult] | DomainEvent | Query[TResult]
-    ) -> Generator[Callable[..., Awaitable[None]] | Callable[..., Awaitable[TResult]], None, None]:
+    ) -> Generator[Callable[..., Awaitable[None]] | Callable[..., Awaitable[TResult]]]:
         return self._iterate_handlers(message)
 
 

@@ -15,7 +15,6 @@ from pybus.domain.exceptions import EntityNotFoundException, SoftDeleteException
 from pybus.infrastructure.database.sqlalchemy import Base, SoftDeleteMixin
 from pybus.infrastructure.models.sqlalchemy import DomainEvent as DomainEventModel
 from pybus.infrastructure.repositories.sqlalchemy import REMOVED, SqlAlchemyGenericRepository
-
 from tests.conftest import DummyEvent, DummyThing, make_dummy_event
 
 

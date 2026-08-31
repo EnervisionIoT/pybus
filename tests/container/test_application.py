@@ -306,8 +306,9 @@ def test_application_container_self_wiring():
 
 def test_application_container_self_provider_binding():
     """Test that __self__ is bound as a Self provider for wiring consistency."""
-    from pybus.container.application import ApplicationContainer
     from dependency_injector import providers
+
+    from pybus.container.application import ApplicationContainer
 
     # Verify __self__ is defined as a Self provider for wiring consistency
     assert isinstance(ApplicationContainer.__self__, providers.Self)

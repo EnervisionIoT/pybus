@@ -5,4 +5,4 @@ from pybus.container import (
     TransactionContainer,
 )
 
-__all__ = ["Application", "ApplicationContainer", "TransactionContainer", "ApplicationSettings"]
+__all__ = ["Application", "ApplicationContainer", "ApplicationSettings", "TransactionContainer"]

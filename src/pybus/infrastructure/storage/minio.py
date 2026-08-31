@@ -12,6 +12,23 @@ from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
 from pybus.application.interfaces import Storage
 from pybus.domain.value_objects import FileObject
 
+# The object keys MinIO answers with when a lookup misses, as opposed to
+# when it fails. Everything else S3Error carries -- permissions, a bad
+# region, a bucket policy -- is a fault, not an absence.
+_MISSING_CODES = ("NoSuchKey", "NoSuchBucket")
+
+
+class FileNotFound(Exception):
+    """No object at that key.
+
+    The name is load-bearing: both services' gRPC interceptors map any
+    exception whose class name ends in `NotFound` to `NOT_FOUND`, matching
+    on the name rather than on an import. This used to be a bare
+    `Exception("File not found")`, which fell through to `INTERNAL` and told
+    a caller the server had broken when in fact they had asked for
+    something that is not there.
+    """
+
 
 class Minio(Storage):
     def __init__(
@@ -50,16 +67,24 @@ class Minio(Storage):
         try:
             self._client.stat_object(bucket_name=bucket, object_name=file_path)
             return True
-        except Exception:
-            return False
+        except S3Error as ex:
+            # Only a miss is False. This used to catch everything, so an
+            # unreachable MinIO, an expired credential or a denied policy
+            # all answered "that file does not exist" -- a caller deciding
+            # whether to upload would be told to overwrite, and a caller
+            # checking before a read would report a clean absence. A storage
+            # backend that is down has to say so.
+            if ex.code in _MISSING_CODES:
+                return False
+            raise
 
     @override
     def get_file(self, bucket: str, file_path: str) -> FileObject:
         try:
             response = self._client.get_object(bucket_name=bucket, object_name=file_path)
         except S3Error as ex:
-            if ex.code in ("NoSuchKey", "NoSuchBucket"):
-                raise Exception("File not found") from ex
+            if ex.code in _MISSING_CODES:
+                raise FileNotFound(f"No object at {bucket}/{file_path}") from ex
             raise
 
         content = response.read()  # 小檔案可直接一次讀

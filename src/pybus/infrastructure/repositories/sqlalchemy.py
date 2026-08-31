@@ -1,6 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import overload, override
 
 from sqlalchemy import func, select
@@ -41,7 +41,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     def __init__(self, session: AsyncSession, correlation_id: uuid.UUID):
         self._session: AsyncSession = session
         self._correlation_id: uuid.UUID = correlation_id
-        self._identity_map: dict[uuid.UUID, TEntity | Removed] = dict()
+        self._identity_map: dict[uuid.UUID, TEntity | Removed] = {}
         self._added_ids: set[uuid.UUID] = set()
 
     async def _paginate(
@@ -56,7 +56,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
 
     @override
     async def get_by_id(self, entity_id: uuid.UUID, skip_filter: bool = False) -> TEntity | None:
-        stmt = self._default_stmt.where(getattr(self.orm_model, "id") == entity_id)
+        stmt = self._default_stmt.where(self.orm_model.id == entity_id)
         if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         instance = await self._session.scalar(stmt)
@@ -66,7 +66,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     async def get_by_ids(
         self, entity_ids: list[uuid.UUID], skip_filter: bool = False
     ) -> list[TEntity]:
-        stmt = self._default_stmt.where(getattr(self.orm_model, "id").in_(entity_ids))
+        stmt = self._default_stmt.where(self.orm_model.id.in_(entity_ids))
         if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         instances = (await self._session.scalars(stmt)).all()
@@ -174,7 +174,7 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
             )
 
         if isinstance(instance, SoftDeleteMixin):
-            instance.deleted_at = datetime.now()
+            instance.deleted_at = datetime.now(UTC)
             await self._session.merge(instance)
         else:
             await self._session.delete(instance)
