@@ -113,6 +113,20 @@ async def test_collect_events_gathers_from_all_aggregate_roots(repo: InMemoryRep
     assert {e.id for e in events} == {event1.id, event2.id}
 
 
+async def test_collect_events_keeps_the_events_of_a_removed_aggregate(repo: InMemoryRepository):
+    """Matches the SQLAlchemy repository: removing an aggregate drops it from
+    `objects`, so an event registered before the removal would otherwise be
+    collected from nowhere. See the note on `remove` there."""
+    thing = DummyThing()
+    event = make_dummy_event(aggregate_id=thing.id)
+    await repo.add(thing)
+    thing.register_event(event)
+    await repo.remove(thing)
+
+    assert await repo.collect_events() == [event]
+    assert await repo.collect_events() == []
+
+
 async def test_save_domain_events_gathers_from_all_aggregate_roots(repo: InMemoryRepository):
     thing = DummyThing()
     event = make_dummy_event(aggregate_id=thing.id)

@@ -264,6 +264,50 @@ async def test_get_by_id_raises_entity_not_found_for_a_removed_entity_in_the_sam
         await repo.get_by_id(entity.id, include_deleted=True)
 
 
+async def test_collect_events_keeps_the_events_of_a_removed_aggregate(
+    repo: WidgetRepository, session: AsyncSession
+):
+    """An aggregate that announces its own deletion must not lose the
+    announcement by being deleted.
+
+    `remove` marks the identity-map slot REMOVED and `collect_events` skips
+    removed slots, so an event registered before the call used to vanish
+    between the handler raising it and the transaction writing the outbox --
+    with the handler having done everything right and nothing raised.
+    """
+    entity = WidgetEntity(name="foo")
+    await repo.add(entity)
+    await session.commit()
+
+    event = make_dummy_event(aggregate_id=entity.id)
+    entity.register_event(event)
+    await repo.remove(entity)
+
+    assert await repo.collect_events() == [event]
+    # Drained, not copied: save_domain_events runs once per repository in the
+    # unit of work, and a second read would write the outbox row twice.
+    assert await repo.collect_events() == []
+
+
+async def test_remove_does_not_drain_events_when_the_row_is_missing(
+    repo: WidgetRepository, session: AsyncSession
+):
+    """A remove that raises leaves the events where it found them.
+
+    Otherwise a caller that catches the failure and retries -- or that
+    removes something else instead -- has already lost the event, and the
+    only sign is an outbox row that never appears.
+    """
+    entity = WidgetEntity(name="foo")
+    event = make_dummy_event(aggregate_id=entity.id)
+    entity.register_event(event)
+
+    with pytest.raises(EntityNotFoundException):
+        await repo.remove(entity)
+
+    assert entity.collect_events() == [event]
+
+
 async def test_persist_all_persists_tracked_entities_fetched_in_the_same_unit_of_work(
     repo: WidgetRepository, session: AsyncSession
 ):

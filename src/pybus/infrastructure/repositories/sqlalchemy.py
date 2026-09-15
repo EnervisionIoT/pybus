@@ -43,6 +43,10 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         self._correlation_id: uuid.UUID = correlation_id
         self._identity_map: dict[uuid.UUID, TEntity | Removed] = {}
         self._added_ids: set[uuid.UUID] = set()
+        # Events drained from aggregates that have since been removed. See
+        # `remove`; without this they are dropped between the handler
+        # registering them and the transaction writing the outbox.
+        self._removed_events: list[DomainEvent] = []
 
     async def _paginate(
         self, stmt: Select[tuple[TModel]], page: int = 1, size: int = 10
@@ -153,12 +157,17 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
 
     @override
     async def collect_events(self) -> list[DomainEvent]:
-        return [
+        live = [
             event
             for entity in self._identity_map.values()
             if not isinstance(entity, Removed)
             for event in entity.collect_events()
         ]
+        # Drained, not copied: `save_domain_events` may run more than once
+        # per unit of work -- once per repository injected into the handler
+        # -- and re-reading these would write the same outbox row twice.
+        removed, self._removed_events = self._removed_events, []
+        return live + removed
 
     @override
     async def remove(self, entity: TEntity):
@@ -174,6 +183,14 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
             raise EntityNotFoundException(
                 repository_name=self.__class__.__name__, entity_id=entity.id
             )
+
+        # Before the slot becomes REMOVED: `collect_events` skips removed
+        # entries, so an aggregate that raises an event *as* it is removed --
+        # announcing its own deletion is the ordinary reason to -- would lose
+        # it here, silently, with the handler having done everything right.
+        # Drained after the row is known to exist, so a failed remove does
+        # not swallow them.
+        self._removed_events.extend(entity.collect_events())
 
         if isinstance(instance, SoftDeleteMixin):
             instance.deleted_at = datetime.now(UTC)
