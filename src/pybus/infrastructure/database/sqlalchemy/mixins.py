@@ -12,7 +12,8 @@ class SoftDeleteMixin:
     # and wrong by whatever the deploying machine's offset happened to be.
     # It also loses an hour, or repeats one, across a DST boundary.
     #
-    # Free to state now: no service uses this mixin yet, so no migration has
-    # ever created the column. Once one has, changing it is an ALTER on a
-    # table holding values whose intended zone nobody recorded.
+    # Cheap to get right here and expensive later: the first migration that
+    # creates this column freezes the type, and changing it afterwards is an
+    # ALTER on a table already holding values whose intended zone nobody
+    # recorded.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

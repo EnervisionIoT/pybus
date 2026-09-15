@@ -9,31 +9,45 @@ if TYPE_CHECKING:
 
 
 class GenericRepository[TEntity: AggregateRoot](ABC):
-    """An interface for a generic repository"""
+    """An interface for a generic repository.
+
+    `include_deleted` appears on every read and means what it says: rows a
+    soft delete has retired are left out unless it is asked for. It only
+    ever does anything for an `orm_model` mixing in `SoftDeleteMixin`; for
+    every other model there is nothing to exclude and the flag is inert.
+
+    It was once called `skip_filter` and was inverted -- the filter applied
+    only when the flag was *set*, so the default returned deleted rows. That
+    was invisible for as long as it lasted, because no model mixed the mixin
+    in and the branch never ran; the first service to adopt soft deletion
+    would have inherited it as "deleted rows keep appearing everywhere".
+    """
 
     @abstractmethod
-    async def get_by_id(self, entity_id: uuid.UUID, skip_filter: bool = False) -> TEntity | None:
+    async def get_by_id(
+        self, entity_id: uuid.UUID, include_deleted: bool = False
+    ) -> TEntity | None:
         raise NotImplementedError()
 
     @abstractmethod
     async def get_by_ids(
-        self, entity_ids: list[uuid.UUID], skip_filter: bool = False
+        self, entity_ids: list[uuid.UUID], include_deleted: bool = False
     ) -> list[TEntity]:
         raise NotImplementedError()
 
     @overload
     async def get_all(
-        self, page: None = None, size: None = None, skip_filter: bool = False
+        self, page: None = None, size: None = None, include_deleted: bool = False
     ) -> list[TEntity]: ...
 
     @overload
     async def get_all(
-        self, page: int = 1, size: int = 10, skip_filter: bool = False
+        self, page: int = 1, size: int = 10, include_deleted: bool = False
     ) -> tuple[int, list[TEntity]]: ...
 
     @abstractmethod
     async def get_all(
-        self, page: int | None = None, size: int | None = None, skip_filter: bool = False
+        self, page: int | None = None, size: int | None = None, include_deleted: bool = False
     ) -> list[TEntity] | tuple[int, list[TEntity]]:
         raise NotImplementedError()
 

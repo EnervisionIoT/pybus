@@ -12,29 +12,29 @@ class InMemoryRepository(GenericRepository[AggregateRoot]):
 
     @override
     async def get_by_id(
-        self, entity_id: uuid.UUID, skip_filter: bool = False
+        self, entity_id: uuid.UUID, include_deleted: bool = False
     ) -> AggregateRoot | None:
         return self.objects.get(entity_id, None)
 
     @override
     async def get_by_ids(
-        self, entity_ids: list[uuid.UUID], skip_filter: bool = False
+        self, entity_ids: list[uuid.UUID], include_deleted: bool = False
     ) -> list[AggregateRoot]:
         return [self.objects[entity_id] for entity_id in entity_ids if entity_id in self.objects]
 
     @overload
     async def get_all(
-        self, page: None = None, size: None = None, skip_filter: bool = False
+        self, page: None = None, size: None = None, include_deleted: bool = False
     ) -> list[AggregateRoot]: ...
 
     @overload
     async def get_all(
-        self, page: int = 1, size: int = 10, skip_filter: bool = False
+        self, page: int = 1, size: int = 10, include_deleted: bool = False
     ) -> tuple[int, list[AggregateRoot]]: ...
 
     @override
     async def get_all(
-        self, page: int | None = None, size: int | None = None, skip_filter: bool = False
+        self, page: int | None = None, size: int | None = None, include_deleted: bool = False
     ) -> list[AggregateRoot] | tuple[int, list[AggregateRoot]]:
         items = list(self.objects.values())
         if page is not None and size is not None:

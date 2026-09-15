@@ -149,7 +149,7 @@ async def test_get_by_ids_filters_out_missing_entities(
     assert [e.id for e in result] == [a.id]
 
 
-async def test_get_by_ids_with_skip_filter_excludes_soft_deleted_rows(
+async def test_get_by_ids_excludes_soft_deleted_rows_by_default(
     repo: WidgetRepository, session: AsyncSession
 ):
     a, b = WidgetEntity(name="a"), WidgetEntity(name="b")
@@ -160,7 +160,7 @@ async def test_get_by_ids_with_skip_filter_excludes_soft_deleted_rows(
     await session.commit()
 
     other_repo = WidgetRepository(session, correlation_id=uuid.uuid4())
-    result = await other_repo.get_by_ids([a.id, b.id], skip_filter=True)
+    result = await other_repo.get_by_ids([a.id, b.id])
 
     assert [e.id for e in result] == [b.id]
 
@@ -191,7 +191,7 @@ async def test_get_all_with_pagination_returns_total_and_page(
     assert len(page) == 2
 
 
-async def test_get_all_with_skip_filter_excludes_soft_deleted_rows(
+async def test_get_all_excludes_soft_deleted_rows_by_default(
     repo: WidgetRepository, session: AsyncSession
 ):
     a, b = WidgetEntity(name="a"), WidgetEntity(name="b")
@@ -202,7 +202,7 @@ async def test_get_all_with_skip_filter_excludes_soft_deleted_rows(
     await session.commit()
 
     other_repo = WidgetRepository(session, correlation_id=uuid.uuid4())
-    result = await other_repo.get_all(skip_filter=True)
+    result = await other_repo.get_all()
 
     assert [e.id for e in result] == [b.id]
 
@@ -245,16 +245,23 @@ async def test_get_by_id_raises_entity_not_found_for_a_removed_entity_in_the_sam
     repo: WidgetRepository, session: AsyncSession
 ):
     """Regression coverage for _get_entity: once an entity has been removed
-    within this repository's identity map, re-fetching it by id (without
-    skip_filter, so the soft-deleted row is still physically returned by the
-    query) must raise instead of silently returning the stale entity."""
+    within this repository's identity map, a read that physically returns the
+    soft-deleted row again must raise rather than hand back the stale entity
+    the map is still holding.
+
+    Reaching that guard takes include_deleted=True now: the ordinary read
+    filters the row out and answers None, which is the same "gone" from the
+    caller's side but arrives without ever consulting the identity map.
+    """
     entity = WidgetEntity(name="foo")
     await repo.add(entity)
     await session.commit()
     await repo.remove(entity)
 
+    assert await repo.get_by_id(entity.id) is None
+
     with pytest.raises(EntityNotFoundException):
-        await repo.get_by_id(entity.id)
+        await repo.get_by_id(entity.id, include_deleted=True)
 
 
 async def test_persist_all_persists_tracked_entities_fetched_in_the_same_unit_of_work(
@@ -310,11 +317,13 @@ async def test_remove_soft_deletes_when_model_supports_it(
     await session.commit()
 
     other_repo = WidgetRepository(session, correlation_id=uuid.uuid4())
-    # skip_filter=True adds the "deleted_at IS NULL" filter, excluding soft-deleted rows.
-    assert await other_repo.get_by_id(entity.id, skip_filter=True) is None
-    # skip_filter=False (default) does not filter, so the soft-deleted row is still visible.
+    # Gone by default: a soft delete is a delete as far as an ordinary read
+    # is concerned, which is the whole point of the mixin.
+    assert await other_repo.get_by_id(entity.id) is None
+    # Still there for a caller that asks for it -- the row was retired, not
+    # destroyed, and something has to be able to see it to restore it.
     still_visible = await WidgetRepository(session, correlation_id=uuid.uuid4()).get_by_id(
-        entity.id
+        entity.id, include_deleted=True
     )
     assert still_visible is not None
 
@@ -378,7 +387,7 @@ async def test_restore_undoes_a_soft_delete(repo: WidgetRepository, session: Asy
     await session.commit()
 
     other_repo = WidgetRepository(session, correlation_id=uuid.uuid4())
-    assert await other_repo.get_by_id(entity.id, skip_filter=True) is not None
+    assert await other_repo.get_by_id(entity.id) is not None
 
 
 async def test_save_domain_events_persists_via_session_add_all_and_returns_them():

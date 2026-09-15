@@ -55,39 +55,41 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
         return total, items
 
     @override
-    async def get_by_id(self, entity_id: uuid.UUID, skip_filter: bool = False) -> TEntity | None:
+    async def get_by_id(
+        self, entity_id: uuid.UUID, include_deleted: bool = False
+    ) -> TEntity | None:
         stmt = self._default_stmt.where(self.orm_model.id == entity_id)
-        if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
+        if not include_deleted and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         instance = await self._session.scalar(stmt)
         return await self._get_entity(instance) if instance else None
 
     @override
     async def get_by_ids(
-        self, entity_ids: list[uuid.UUID], skip_filter: bool = False
+        self, entity_ids: list[uuid.UUID], include_deleted: bool = False
     ) -> list[TEntity]:
         stmt = self._default_stmt.where(self.orm_model.id.in_(entity_ids))
-        if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
+        if not include_deleted and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         instances = (await self._session.scalars(stmt)).all()
         return [await self._get_entity(instance) for instance in instances]
 
     @overload
     async def get_all(
-        self, page: None = None, size: None = None, skip_filter: bool = False
+        self, page: None = None, size: None = None, include_deleted: bool = False
     ) -> list[TEntity]: ...
 
     @overload
     async def get_all(
-        self, page: int = 1, size: int = 10, skip_filter: bool = False
+        self, page: int = 1, size: int = 10, include_deleted: bool = False
     ) -> tuple[int, list[TEntity]]: ...
 
     @override
     async def get_all(
-        self, page: int | None = None, size: int | None = None, skip_filter: bool = False
+        self, page: int | None = None, size: int | None = None, include_deleted: bool = False
     ) -> list[TEntity] | tuple[int, list[TEntity]]:
         stmt = self._default_stmt
-        if skip_filter and issubclass(self.orm_model, SoftDeleteMixin):
+        if not include_deleted and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         if page is not None and size is not None:
             total, instances = await self._paginate(stmt, page or 1, size or 10)
