@@ -21,7 +21,12 @@ from pybus.infrastructure.database.session import DataBaseSession
 class TransactionContainer(containers.DeclarativeContainer):
     correlation_id: providers.Provider[UUID] = providers.Singleton(uuid.uuid4)
     kafka_producer: providers.Provider[AIOProducer] = providers.Dependency(instance_of=AIOProducer)
-    session: providers.Provider[DataBaseSession] = providers.Dependency(instance_of=DataBaseSession)
+    # The port is the lookup key, not the thing constructed: container.py
+    # registers a concrete session against it. mypy is right that an ABC cannot
+    # be instantiated and wrong that anything here tries to.
+    session: providers.Provider[DataBaseSession] = providers.Dependency(
+        instance_of=DataBaseSession  # type: ignore[type-abstract]
+    )
     logger: providers.Provider[Logger] = providers.Dependency(instance_of=Logger)
 
 
@@ -208,13 +213,18 @@ class TransactionContext:
 
         return parameters
 
+    # `-> None` here was the same lie as `execute_command`'s, one layer down:
+    # the body returns `await call_next()`, which for a command is the
+    # handler's `<Verb><Noun>Result`. Correcting only the caller left this
+    # overload contradicting it, and the command branch of `execute_command`
+    # unable to return anything.
     @overload
     async def call[TResult](
         self,
         handler: Callable[..., Awaitable[TResult]],
         message: Command[TResult],
         pagination: None = None,
-    ) -> None: ...
+    ) -> TResult: ...
 
     @overload
     async def call[TResult](
@@ -257,7 +267,11 @@ class TransactionContext:
 
         return await call_next()
 
-    async def execute_command[TResult](self, command: Command[TResult]) -> None:
+    async def execute_command[TResult](self, command: Command[TResult]) -> TResult | None:
+        # `| None` is not defensive: the loop below returns from its first
+        # iteration, so an empty handler iterator falls through to an
+        # implicit None. Callers reach this through `execute()`, which
+        # raises before that point.
         if self._handlers_iterator is None:
             raise RuntimeError("Handlers iterator is not configured")
 

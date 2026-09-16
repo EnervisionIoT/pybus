@@ -293,7 +293,10 @@ class Application(ApplicationModule):
             if isinstance(message, Command):
                 return await ctx.execute_command(message)
             if isinstance(message, DomainEvent):
-                return await ctx.execute_event(message)
+                # Awaited, not returned: an event handler produces no result,
+                # and returning one read as though it might.
+                await ctx.execute_event(message)
+                return None
 
             return await ctx.execute_query(message, pagination)
 

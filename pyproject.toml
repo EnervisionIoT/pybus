@@ -30,10 +30,16 @@ build-backend = "hatchling.build"
 dev = [
     "aiosqlite>=0.22.1",
     "coverage>=7.13.5",
+    "mypy>=1.18.2",
     "pre-commit>=4.5.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.9",
+    # No module here imports grpc today -- unlike the five services, pybus
+    # serves no RPC. Carried anyway so the six packages' type-checking dev
+    # groups are one list, and so the day something here does reach for grpc
+    # it is checked rather than silently untyped.
+    "types-grpcio>=1.0.0.20250914",
     # The same two the `sqlalchemy` extra carries, repeated here because the
     # test suite cannot run without them: `pybus.container.application`
     # imports sqlalchemy unconditionally, so the extra is optional to a
@@ -60,3 +66,18 @@ docstring-code-line-length = 20
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
+
+[tool.mypy]
+files = ["src"]
+# Default strictness, deliberately. The gRPC surface is what this exists to
+# check, and the default already rejects a call to an RPC the generated stub
+# does not declare, a field the message does not have, and a value of the
+# wrong type. Turning on strict here would surface hundreds of unrelated
+# untyped-def findings and bury the ones that matter.
+disable_error_code = [
+    # pydantic's own idiom is `@computed_field` stacked on `@property`, and
+    # mypy does not support decorators on top of `@property`. Disabled
+    # rather than ignored per site, so the next `@computed_field` does not
+    # add another ignore line.
+    "prop-decorator",
+]

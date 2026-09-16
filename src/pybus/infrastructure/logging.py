@@ -1,12 +1,22 @@
 import logging
 import os
 from logging.config import dictConfig
-from typing import Any
+from typing import Any, ClassVar
 
 
 class LoggerFactory:
     _configured: bool = False
     _logger: logging.Logger | None = None
+    # Declared here rather than annotated at the point of assignment inside
+    # `configure`: that form is not a declaration as far as mypy is
+    # concerned, so every later read was of an attribute the checker
+    # believed never existed. Declared without a default, because `str` is
+    # what `configure` assigns and `create_logger` calls `configure` before
+    # either is read -- a `= None` default would widen both to a value
+    # neither ever holds, and hand `RotatingFileHandler` a `filename` of
+    # None as a type the code claims is reachable.
+    logger_name: ClassVar[str]
+    log_filename: ClassVar[str]
 
     @classmethod
     def configure(cls, logger_name: str = "pybus", log_relative_path: str = "logs/pybus.log"):
@@ -14,8 +24,8 @@ class LoggerFactory:
         full_log_path = os.path.join(project_dir, log_relative_path)
         os.makedirs(os.path.dirname(full_log_path), exist_ok=True)
 
-        cls.logger_name: str = logger_name
-        cls.log_filename: str = full_log_path
+        cls.logger_name = logger_name
+        cls.log_filename = full_log_path
         cls._configured = True
 
     @classmethod

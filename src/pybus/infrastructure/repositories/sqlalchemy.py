@@ -1,5 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import overload, override
 
@@ -62,7 +63,12 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     async def get_by_id(
         self, entity_id: uuid.UUID, include_deleted: bool = False
     ) -> TEntity | None:
-        stmt = self._default_stmt.where(self.orm_model.id == entity_id)
+        # Ours, and deliberately left so -- see the spec's decision 3.
+        # `TModel` is bound to `Base`, which declares no `id`; every ORM
+        # model this is used with has one, but saying that in the bound is a
+        # change to pybus's public generics that five packages would have to
+        # re-pin for, and it is a separate round.
+        stmt = self._default_stmt.where(self.orm_model.id == entity_id)  # type: ignore[attr-defined]
         if not include_deleted and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         instance = await self._session.scalar(stmt)
@@ -72,7 +78,9 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     async def get_by_ids(
         self, entity_ids: list[uuid.UUID], include_deleted: bool = False
     ) -> list[TEntity]:
-        stmt = self._default_stmt.where(self.orm_model.id.in_(entity_ids))
+        # Same as `get_by_id` above: `TModel`'s bound is `Base`, which has no
+        # `id`, and tightening it is a public generics change (decision 3).
+        stmt = self._default_stmt.where(self.orm_model.id.in_(entity_ids))  # type: ignore[attr-defined]
         if not include_deleted and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
         instances = (await self._session.scalars(stmt)).all()
@@ -92,6 +100,13 @@ class SqlAlchemyGenericRepository[TEntity: AggregateRoot, TModel: Base](
     async def get_all(
         self, page: int | None = None, size: int | None = None, include_deleted: bool = False
     ) -> list[TEntity] | tuple[int, list[TEntity]]:
+        # Declared because the two branches bind it differently -- `_paginate`
+        # hands back a list, `scalars().all()` a Sequence -- and mypy takes
+        # the first binding as the variable's type. `Sequence` rather than
+        # `list(...)` around the second: nothing here mutates it, both uses
+        # are a single comprehension, and copying a result set to satisfy a
+        # checker is a cost paid on every unpaginated read.
+        instances: Sequence[TModel]
         stmt = self._default_stmt
         if not include_deleted and issubclass(self.orm_model, SoftDeleteMixin):
             stmt = stmt.where(self.orm_model.deleted_at.is_(None))
