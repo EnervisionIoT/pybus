@@ -267,11 +267,12 @@ class TransactionContext:
 
         return await call_next()
 
-    async def execute_command[TResult](self, command: Command[TResult]) -> TResult | None:
-        # `| None` is not defensive: the loop below returns from its first
-        # iteration, so an empty handler iterator falls through to an
-        # implicit None. Callers reach this through `execute()`, which
-        # raises before that point.
+    async def execute_command[TResult](self, command: Command[TResult]) -> TResult:
+        # Not `TResult | None`: the one `return` below goes through `call`'s
+        # Command overload, which hands back the handler's result, and an
+        # empty handler iterator falls out of the loop into the
+        # `NoHandlerFound` raise at the end. No path here yields a None,
+        # which is why this matches `execute_query` beneath it.
         if self._handlers_iterator is None:
             raise RuntimeError("Handlers iterator is not configured")
 

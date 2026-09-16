@@ -69,11 +69,15 @@ keep-runtime-typing = true
 
 [tool.mypy]
 files = ["src"]
-# Default strictness, deliberately. The gRPC surface is what this exists to
-# check, and the default already rejects a call to an RPC the generated stub
-# does not declare, a field the message does not have, and a value of the
-# wrong type. Turning on strict here would surface hundreds of unrelated
-# untyped-def findings and bury the ones that matter.
+# Default strictness, deliberately -- and this paragraph deliberately reads
+# differently from the otherwise identical block in the five services, which
+# justifies itself by the gRPC surface it checks. pybus serves no RPC and has
+# no generated stubs. What it has instead is the machinery all five route
+# through, and the default already rejects what that was hiding: a return
+# annotation contradicting its own body, an attribute never declared, a value
+# of the wrong type. Turning on strict here would surface hundreds of
+# unrelated untyped-def findings and bury the ones that matter. Every
+# directive below is the same as the other five; only this comment diverges.
 disable_error_code = [
     # pydantic's own idiom is `@computed_field` stacked on `@property`, and
     # mypy does not support decorators on top of `@property`. Disabled
