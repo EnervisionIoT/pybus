@@ -27,7 +27,7 @@ class RedisCache(Cache):
 
     @override
     def get_set(self, key: str) -> set[str]:
-        result = cast(set[str], self._client.smembers(key))  # type: ignore
+        result = cast(set[str], self._client.smembers(key))
         return result
 
     @override
@@ -47,4 +47,4 @@ class RedisCache(Cache):
         self._client.delete(key)
 
     def flushall(self) -> None:
-        self._client.flushall()  # type: ignore
+        self._client.flushall()

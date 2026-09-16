@@ -68,6 +68,9 @@ docstring-code-line-length = 20
 keep-runtime-typing = true
 
 [tool.mypy]
+# tests are deliberately out of scope for this round: this exists to check
+# the machinery pybus's consumers route through, not the test suite, and
+# bringing tests into the same strictness is its own round.
 files = ["src"]
 # Default strictness, deliberately -- and this paragraph deliberately reads
 # differently from the otherwise identical block in the five services, which
@@ -84,4 +87,11 @@ disable_error_code = [
     # rather than ignored per site, so the next `@computed_field` does not
     # add another ignore line.
     "prop-decorator",
+]
+enable_error_code = [
+    # A bare `# type: ignore` silences whatever happens to be on the line,
+    # including an error nobody has read. Requiring the code makes each one
+    # a statement about a specific mismatch, which is the only form that can
+    # be re-judged later.
+    "ignore-without-code",
 ]

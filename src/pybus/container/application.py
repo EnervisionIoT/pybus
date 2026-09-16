@@ -112,7 +112,7 @@ def build_transaction_container[TTransactionContainer](
 
 
 class ApplicationContainer(containers.DeclarativeContainer):
-    __self__: providers.Provider["ApplicationContainer"] = providers.Self()  # type: ignore
+    __self__: providers.Provider["ApplicationContainer"] = providers.Self()  # type: ignore[assignment]
 
     config: providers.Provider[ApplicationSettings] = providers.Dependency(
         instance_of=ApplicationSettings
