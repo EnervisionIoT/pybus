@@ -1,0 +1,23 @@
+# LF everywhere, stated rather than assumed.
+#
+# Every repository on this platform already stored LF; what was missing was
+# anything that said so. Nothing else catches a flip -- `ruff format --check`,
+# `ruff check`, mypy and the test suites all pass on either ending -- so a tool
+# that renormalises a file turns a one-line edit into a whole-file diff and no
+# check complains. Three files in notify had drifted to CRLF before anyone
+# counted bytes, and one of the three was written that way deliberately, by
+# someone sampling the convention with `grep -c $'\r'` and believing the
+# numbers it returned. Do not check endings that way; count bytes in the
+# committed blob.
+#
+# `text=auto` leaves git's binary detection alone, so a tracked binary is
+# still never rewritten, and `eol=lf` is what lands in the working tree --
+# which is the half that matters on Windows, where the drift came from.
+* text=auto eol=lf
+
+# A CRLF shell script is not a slow-burning style problem. The container fails
+# immediately and opaquely: `#!/bin/sh^M: no such file or directory`, or an
+# entrypoint whose `set -e` is really `set -e\r`. Stated separately from the
+# blanket rule above so that narrowing that rule cannot quietly take this with
+# it.
+*.sh text eol=lf
