@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Test artefacts. .coverage was tracked from 804c118 until now -- a 72KB
+# SQLite file that every coverage run rewrote, so it arrived in diffs as an
+# unreviewable binary blob. Nothing reads it but the tool that wrote it.
+.coverage
+.coverage.*
+htmlcov/
