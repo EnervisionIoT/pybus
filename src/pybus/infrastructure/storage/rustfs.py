@@ -2,28 +2,33 @@
 
 This was `Minio`, over the `minio` SDK, until the `minio/minio` image stopped
 being pullable from Docker Hub and the compose stack moved to RustFS. The SDK
-went too, for boto3: RustFS ships no Python client of its own and documents
-boto3 as the one to use, and keeping a MinIO-named dependency to talk to a
-server that is not MinIO would leave the next reader guessing which of the two
-the code actually targets. Nothing here is RustFS-specific beyond the name --
-it is plain S3 -- which is why the swap was a rewrite of one file.
+went too: RustFS ships no Python client of its own and documents boto3, and a
+MinIO-named dependency talking to a server that is not MinIO would leave the
+next reader guessing which of the two the code targets. Nothing here is
+RustFS-specific beyond the name -- it is plain S3.
+
+It was boto3 for one release (v1.7) and is aioboto3 now, which is why the
+`Storage` port is async. Every caller is an async handler, and a synchronous
+S3 call there blocks the event loop for the length of the round trip --
+every other request the process is serving waits on somebody's upload.
 """
 
 import io
 import mimetypes
 import secrets
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
-import boto3
-from botocore.config import Config
+import aioboto3
+from aiobotocore.config import AioConfig
 from botocore.exceptions import ClientError
 
 from pybus.application.interfaces import Storage
 from pybus.domain.value_objects import FileObject
 
 if TYPE_CHECKING:
-    from mypy_boto3_s3 import S3Client
+    from types_aiobotocore_s3 import S3Client
 
 # The error codes that mean a lookup missed, as opposed to failed. Everything
 # else a ClientError carries -- permissions, a bad region, a bucket policy --
@@ -67,82 +72,100 @@ class FileNotFound(Exception):
 
 
 class RustFS(Storage):
+    """A client per call, opened and closed inside it, over one session.
+
+    aiobotocore's client is an async context manager: it owns an aiohttp
+    connection pool that has to be closed on the event loop that opened it.
+    Holding one for the adapter's lifetime would mean a `close()` every
+    service has to remember to await at shutdown, and pybus's container has
+    no hook that would do it for them -- while `Storage` has no consumer yet
+    to say the cost is worth it. So each method opens its own. The known
+    cost is a fresh connection per call; the service model is loaded once,
+    because the session caches it. Revisit when something calls this often
+    enough to notice.
+    """
+
     def __init__(
         self, endpoint: str, access_key: str, secret_key: str, secure: bool = False
     ) -> None:
-        # `endpoint` stays `host:port` with a separate `secure`, the shape the
-        # minio SDK took, so a caller's settings did not have to change with
-        # the client. boto3 wants a URL, so it is built here.
-        self._client: S3Client = boto3.client(
-            "s3",
-            endpoint_url=f"{'https' if secure else 'http'}://{endpoint}",
+        self._session = aioboto3.Session(
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
-            # Path-style, because boto3's default virtual-hosted style puts
-            # the bucket in the hostname (`bucket.rustfs:9000`), which no DNS
-            # inside compose resolves. The region is required by SigV4 and
-            # ignored by RustFS; us-east-1 is the value every S3-compatible
-            # server accepts.
+            # Required by SigV4 and ignored by RustFS; us-east-1 is the value
+            # every S3-compatible server accepts.
             region_name="us-east-1",
-            config=Config(s3={"addressing_style": "path"}),
         )
+        # `endpoint` stays `host:port` with a separate `secure`, the shape the
+        # minio SDK took, so a caller's settings did not have to change with
+        # the client. botocore wants a URL, so it is built here.
+        self._endpoint_url = f"{'https' if secure else 'http'}://{endpoint}"
+        # Path-style, because the default virtual-hosted style puts the bucket
+        # in the hostname (`bucket.rustfs:9000`), which no DNS inside compose
+        # resolves.
+        self._config = AioConfig(s3={"addressing_style": "path"})
 
-    def _ensure_bucket(self, bucket: str) -> None:
+    def _client(self) -> "AbstractAsyncContextManager[S3Client]":
+        return self._session.client("s3", endpoint_url=self._endpoint_url, config=self._config)
+
+    @staticmethod
+    async def _ensure_bucket(client: "S3Client", bucket: str) -> None:
         try:
-            self._client.head_bucket(Bucket=bucket)
+            await client.head_bucket(Bucket=bucket)
         except ClientError as ex:
             if not _is_missing(ex):
                 raise
-            self._client.create_bucket(Bucket=bucket)
+            await client.create_bucket(Bucket=bucket)
 
     @override
-    def set_bucket_lifecycle(self, bucket: str, days: int) -> None:
-        self._ensure_bucket(bucket)
-        self._client.put_bucket_lifecycle_configuration(
-            Bucket=bucket,
-            LifecycleConfiguration={
-                "Rules": [
-                    {
-                        "ID": secrets.token_urlsafe(32),
-                        "Status": "Enabled",
-                        "Filter": {"Prefix": ""},
-                        "Expiration": {"Days": days},
-                    }
-                ]
-            },
-        )
+    async def set_bucket_lifecycle(self, bucket: str, days: int) -> None:
+        async with self._client() as client:
+            await self._ensure_bucket(client, bucket)
+            await client.put_bucket_lifecycle_configuration(
+                Bucket=bucket,
+                LifecycleConfiguration={
+                    "Rules": [
+                        {
+                            "ID": secrets.token_urlsafe(32),
+                            "Status": "Enabled",
+                            "Filter": {"Prefix": ""},
+                            "Expiration": {"Days": days},
+                        }
+                    ]
+                },
+            )
 
     @override
-    def check_file_exists(self, bucket: str, file_path: str) -> bool:
-        self._ensure_bucket(bucket)
-        try:
-            self._client.head_object(Bucket=bucket, Key=file_path)
-            return True
-        except ClientError as ex:
-            # Only a miss is False. This used to catch everything, so an
-            # unreachable backend, an expired credential or a denied policy
-            # all answered "that file does not exist" -- a caller deciding
-            # whether to upload would be told to overwrite, and a caller
-            # checking before a read would report a clean absence. A storage
-            # backend that is down has to say so.
-            if _is_missing(ex):
-                return False
-            raise
+    async def check_file_exists(self, bucket: str, file_path: str) -> bool:
+        async with self._client() as client:
+            await self._ensure_bucket(client, bucket)
+            try:
+                await client.head_object(Bucket=bucket, Key=file_path)
+                return True
+            except ClientError as ex:
+                # Only a miss is False. This used to catch everything, so an
+                # unreachable backend, an expired credential or a denied policy
+                # all answered "that file does not exist" -- a caller deciding
+                # whether to upload would be told to overwrite, and a caller
+                # checking before a read would report a clean absence. A
+                # storage backend that is down has to say so.
+                if _is_missing(ex):
+                    return False
+                raise
 
     @override
-    def get_file(self, bucket: str, file_path: str) -> FileObject:
-        try:
-            response = self._client.get_object(Bucket=bucket, Key=file_path)
-        except ClientError as ex:
-            if _is_missing(ex):
-                raise FileNotFound(f"No object at {bucket}/{file_path}") from ex
-            raise
+    async def get_file(self, bucket: str, file_path: str) -> FileObject:
+        async with self._client() as client:
+            try:
+                response = await client.get_object(Bucket=bucket, Key=file_path)
+            except ClientError as ex:
+                if _is_missing(ex):
+                    raise FileNotFound(f"No object at {bucket}/{file_path}") from ex
+                raise
 
-        body = response["Body"]
-        try:
-            content = body.read()  # 小檔案可直接一次讀
-        finally:
-            body.close()
+            # Read inside the client's block: the body streams from the
+            # client's connection pool, which closes when the block exits.
+            async with response["Body"] as body:
+                content = await body.read()  # 小檔案可直接一次讀
         content_type = response.get("ContentType", "application/octet-stream")
 
         return FileObject(
@@ -153,20 +176,21 @@ class RustFS(Storage):
         )
 
     @override
-    def upload_file(self, bucket: str, file: FileObject, object_name: str) -> None:
-        self._ensure_bucket(bucket)
-
-        self._client.put_object(
-            Bucket=bucket,
-            Key=object_name,
-            # Bytes rather than the stream. FileObject.stream is declared
-            # io.IOBase so pydantic's isinstance check accepts an io.BytesIO,
-            # and that is not a type boto3's stubs take as a Body. Reading it
-            # out is cheap because FileObject refuses anything over 2MB.
-            Body=file.to_bytes(),
-            ContentLength=file.size,
-            ContentType=file.content_type,
-        )
+    async def upload_file(self, bucket: str, file: FileObject, object_name: str) -> None:
+        async with self._client() as client:
+            await self._ensure_bucket(client, bucket)
+            await client.put_object(
+                Bucket=bucket,
+                Key=object_name,
+                # Bytes rather than the stream. FileObject.stream is declared
+                # io.IOBase so pydantic's isinstance check accepts an
+                # io.BytesIO, and that is not a type the stubs take as a Body.
+                # Reading it out is cheap because FileObject refuses anything
+                # over 2MB.
+                Body=file.to_bytes(),
+                ContentLength=file.size,
+                ContentType=file.content_type,
+            )
 
 
 __all__ = ["FileNotFound", "RustFS"]

@@ -1,5 +1,5 @@
 import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -9,15 +9,28 @@ from pybus.infrastructure.storage.rustfs import FileNotFound, RustFS
 
 
 @pytest.fixture
-def mock_client():
-    with patch("pybus.infrastructure.storage.rustfs.boto3.client") as client_factory:
-        client = MagicMock()
-        client_factory.return_value = client
-        yield client
+def session():
+    with patch("pybus.infrastructure.storage.rustfs.aioboto3.Session") as session_cls:
+        session = MagicMock()
+        session_cls.return_value = session
+        yield session
 
 
 @pytest.fixture
-def storage(mock_client) -> RustFS:
+def mock_client(session: MagicMock) -> AsyncMock:
+    """The client `async with session.client(...)` yields.
+
+    Every method's calls are awaited, so an AsyncMock -- a plain MagicMock
+    here would hand the adapter a coroutine-less value and every `await`
+    would raise before the assertion under test was reached.
+    """
+    client = AsyncMock()
+    session.client.return_value.__aenter__.return_value = client
+    return client
+
+
+@pytest.fixture
+def storage(mock_client: AsyncMock) -> RustFS:
     return RustFS(endpoint="localhost:9000", access_key="ak", secret_key="sk")
 
 
@@ -25,33 +38,69 @@ def make_client_error(code: str, operation: str = "HeadObject") -> ClientError:
     return ClientError({"Error": {"Code": code, "Message": "error"}}, operation)
 
 
-def test_the_client_is_path_style_against_the_endpoint_given():
-    """Virtual-hosted style is boto3's default and puts the bucket in the
+def make_body(content: bytes) -> MagicMock:
+    """aiobotocore's streaming body: an async context manager whose `read`
+    is awaited. Read outside that block and the connection it streams from
+    is already gone."""
+    body = MagicMock()
+    body.__aenter__.return_value = body
+    body.read = AsyncMock(return_value=content)
+    return body
+
+
+def file_of(content: bytes) -> FileObject:
+    return FileObject(
+        filename="a.bin",
+        content_type="application/octet-stream",
+        size=0,
+        stream=io.BytesIO(content),
+    )
+
+
+async def test_the_client_is_path_style_against_the_endpoint_given(
+    storage: RustFS, session: MagicMock
+):
+    """Virtual-hosted style is the default and puts the bucket in the
     hostname -- `bucket.rustfs:9000` -- which nothing inside compose
     resolves. Every request would fail at DNS, not at S3."""
-    with patch("pybus.infrastructure.storage.rustfs.boto3.client") as client_factory:
-        RustFS(endpoint="rustfs:9000", access_key="ak", secret_key="sk")
+    await storage.check_file_exists("bucket", "key")
 
-    _, kwargs = client_factory.call_args
-    assert kwargs["endpoint_url"] == "http://rustfs:9000"
+    _, kwargs = session.client.call_args
+    assert kwargs["endpoint_url"] == "http://localhost:9000"
     assert kwargs["config"].s3 == {"addressing_style": "path"}
 
 
-def test_secure_builds_an_https_endpoint():
-    with patch("pybus.infrastructure.storage.rustfs.boto3.client") as client_factory:
-        RustFS(endpoint="s3.example.com", access_key="ak", secret_key="sk", secure=True)
+async def test_secure_builds_an_https_endpoint(session: MagicMock, mock_client: AsyncMock):
+    storage = RustFS(endpoint="s3.example.com", access_key="ak", secret_key="sk", secure=True)
 
-    _, kwargs = client_factory.call_args
+    await storage.check_file_exists("bucket", "key")
+
+    _, kwargs = session.client.call_args
     assert kwargs["endpoint_url"] == "https://s3.example.com"
 
 
-def test_set_bucket_lifecycle_creates_bucket_when_missing(storage: RustFS, mock_client: MagicMock):
+async def test_each_call_closes_the_client_it_opened(storage: RustFS, session: MagicMock):
+    """The adapter holds no client between calls -- see `RustFS`'s
+    docstring -- so a call that left its client open would leak an aiohttp
+    connection pool every time, with a warning at interpreter exit as the
+    only symptom."""
+    await storage.check_file_exists("bucket", "key")
+    await storage.upload_file("bucket", file_of(b"x"), "key")
+
+    context = session.client.return_value
+    assert context.__aenter__.await_count == 2
+    assert context.__aexit__.await_count == 2
+
+
+async def test_set_bucket_lifecycle_creates_bucket_when_missing(
+    storage: RustFS, mock_client: AsyncMock
+):
     mock_client.head_bucket.side_effect = make_client_error("404", "HeadBucket")
 
-    storage.set_bucket_lifecycle("my-bucket", days=30)
+    await storage.set_bucket_lifecycle("my-bucket", days=30)
 
-    mock_client.create_bucket.assert_called_once_with(Bucket="my-bucket")
-    mock_client.put_bucket_lifecycle_configuration.assert_called_once()
+    mock_client.create_bucket.assert_awaited_once_with(Bucket="my-bucket")
+    mock_client.put_bucket_lifecycle_configuration.assert_awaited_once()
     _, kwargs = mock_client.put_bucket_lifecycle_configuration.call_args
     assert kwargs["Bucket"] == "my-bucket"
     (rule,) = kwargs["LifecycleConfiguration"]["Rules"]
@@ -59,55 +108,55 @@ def test_set_bucket_lifecycle_creates_bucket_when_missing(storage: RustFS, mock_
     assert rule["Status"] == "Enabled"
 
 
-def test_set_bucket_lifecycle_skips_creation_when_bucket_exists(
-    storage: RustFS, mock_client: MagicMock
+async def test_set_bucket_lifecycle_skips_creation_when_bucket_exists(
+    storage: RustFS, mock_client: AsyncMock
 ):
-    storage.set_bucket_lifecycle("my-bucket", days=30)
+    await storage.set_bucket_lifecycle("my-bucket", days=30)
 
-    mock_client.create_bucket.assert_not_called()
+    mock_client.create_bucket.assert_not_awaited()
 
 
-def test_a_bucket_check_that_fails_is_not_taken_for_a_missing_bucket(
-    storage: RustFS, mock_client: MagicMock
+async def test_a_bucket_check_that_fails_is_not_taken_for_a_missing_bucket(
+    storage: RustFS, mock_client: AsyncMock
 ):
-    """`head_bucket` raising is how boto3 says both "no such bucket" and
-    "you may not look". Creating a bucket on the second would turn a denied
-    credential into a confusing CreateBucket error, or into a bucket nobody
-    meant to make."""
+    """`head_bucket` raising is how the client says both "no such bucket"
+    and "you may not look". Creating a bucket on the second would turn a
+    denied credential into a confusing CreateBucket error, or into a bucket
+    nobody meant to make."""
     mock_client.head_bucket.side_effect = make_client_error("403", "HeadBucket")
 
     with pytest.raises(ClientError):
-        storage.set_bucket_lifecycle("my-bucket", days=30)
+        await storage.set_bucket_lifecycle("my-bucket", days=30)
 
-    mock_client.create_bucket.assert_not_called()
+    mock_client.create_bucket.assert_not_awaited()
 
 
-def test_check_file_exists_creates_bucket_then_returns_true_on_success(
-    storage: RustFS, mock_client: MagicMock
+async def test_check_file_exists_creates_bucket_then_returns_true_on_success(
+    storage: RustFS, mock_client: AsyncMock
 ):
     mock_client.head_bucket.side_effect = make_client_error("404", "HeadBucket")
 
-    result = storage.check_file_exists("bucket", "path/file.txt")
+    result = await storage.check_file_exists("bucket", "path/file.txt")
 
     assert result is True
-    mock_client.create_bucket.assert_called_once_with(Bucket="bucket")
-    mock_client.head_object.assert_called_once_with(Bucket="bucket", Key="path/file.txt")
+    mock_client.create_bucket.assert_awaited_once_with(Bucket="bucket")
+    mock_client.head_object.assert_awaited_once_with(Bucket="bucket", Key="path/file.txt")
 
 
 @pytest.mark.parametrize("code", ["404", "NotFound", "NoSuchKey", "NoSuchBucket"])
-def test_check_file_exists_returns_false_when_the_object_is_missing(
-    storage: RustFS, mock_client: MagicMock, code: str
+async def test_check_file_exists_returns_false_when_the_object_is_missing(
+    storage: RustFS, mock_client: AsyncMock, code: str
 ):
     """A real server answers a missing key with "404": HEAD has no body, so
-    botocore reports the status as the code. The named codes are there for the GET
-    path and for servers that answer HEAD differently."""
+    botocore reports the status as the code. The named codes are there for
+    the GET path and for servers that answer HEAD differently."""
     mock_client.head_object.side_effect = make_client_error(code)
 
-    assert storage.check_file_exists("bucket", "path/file.txt") is False
+    assert await storage.check_file_exists("bucket", "path/file.txt") is False
 
 
-def test_check_file_exists_does_not_report_a_broken_backend_as_absence(
-    storage: RustFS, mock_client: MagicMock
+async def test_check_file_exists_does_not_report_a_broken_backend_as_absence(
+    storage: RustFS, mock_client: AsyncMock
 ):
     """An earlier version caught everything and answered False.
 
@@ -120,22 +169,21 @@ def test_check_file_exists_does_not_report_a_broken_backend_as_absence(
     mock_client.head_object.side_effect = make_client_error("AccessDenied")
 
     with pytest.raises(ClientError):
-        storage.check_file_exists("bucket", "path/file.txt")
+        await storage.check_file_exists("bucket", "path/file.txt")
 
 
-def test_get_file_builds_file_object_from_response(storage: RustFS, mock_client: MagicMock):
+async def test_get_file_builds_file_object_from_response(storage: RustFS, mock_client: AsyncMock):
     content = b"hello world"
-    body = MagicMock()
-    body.read.return_value = content
+    body = make_body(content)
     mock_client.get_object.return_value = {"Body": body, "ContentType": "text/plain"}
 
-    file_obj = storage.get_file("bucket", "path/file.txt")
+    file_obj = await storage.get_file("bucket", "path/file.txt")
 
     assert isinstance(file_obj, FileObject)
     assert file_obj.to_bytes() == content
     assert file_obj.content_type == "text/plain"
     assert file_obj.size == len(content)
-    body.close.assert_called_once()
+    body.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -152,18 +200,17 @@ def test_get_file_builds_file_object_from_response(storage: RustFS, mock_client:
         ("uploads/abc123", "application/x-nothing-knows-this", "abc123"),
     ],
 )
-def test_get_file_names_the_file_after_its_key(
-    storage: RustFS, mock_client: MagicMock, key: str, content_type: str, expected: str
+async def test_get_file_names_the_file_after_its_key(
+    storage: RustFS, mock_client: AsyncMock, key: str, content_type: str, expected: str
 ):
-    mock_client.get_object.return_value = {"Body": MagicMock(), "ContentType": content_type}
-    mock_client.get_object.return_value["Body"].read.return_value = b"x"
+    mock_client.get_object.return_value = {"Body": make_body(b"x"), "ContentType": content_type}
 
-    assert storage.get_file("bucket", key).filename == expected
+    assert (await storage.get_file("bucket", key)).filename == expected
 
 
 @pytest.mark.parametrize("code", ["NoSuchKey", "NoSuchBucket"])
-def test_get_file_raises_file_not_found_when_the_object_is_missing(
-    storage: RustFS, mock_client: MagicMock, code: str
+async def test_get_file_raises_file_not_found_when_the_object_is_missing(
+    storage: RustFS, mock_client: AsyncMock, code: str
 ):
     """`FileNotFound`, not a bare `Exception`.
 
@@ -176,7 +223,7 @@ def test_get_file_raises_file_not_found_when_the_object_is_missing(
     mock_client.get_object.side_effect = make_client_error(code, "GetObject")
 
     with pytest.raises(FileNotFound, match="bucket/missing.txt"):
-        storage.get_file("bucket", "missing.txt")
+        await storage.get_file("bucket", "missing.txt")
 
 
 def test_file_not_found_is_named_so_the_interceptors_map_it():
@@ -186,29 +233,23 @@ def test_file_not_found_is_named_so_the_interceptors_map_it():
     assert FileNotFound.__name__.endswith("NotFound")
 
 
-def test_get_file_reraises_other_client_errors(storage: RustFS, mock_client: MagicMock):
+async def test_get_file_reraises_other_client_errors(storage: RustFS, mock_client: AsyncMock):
     mock_client.get_object.side_effect = make_client_error("InternalError", "GetObject")
 
     with pytest.raises(ClientError):
-        storage.get_file("bucket", "missing.txt")
+        await storage.get_file("bucket", "missing.txt")
 
 
-def test_upload_file_creates_bucket_when_missing_and_uploads(
-    storage: RustFS, mock_client: MagicMock
+async def test_upload_file_creates_bucket_when_missing_and_uploads(
+    storage: RustFS, mock_client: AsyncMock
 ):
     mock_client.head_bucket.side_effect = make_client_error("404", "HeadBucket")
     content = b"payload"
-    file_obj = FileObject(
-        filename="a.bin",
-        content_type="application/octet-stream",
-        size=0,
-        stream=io.BytesIO(content),
-    )
 
-    storage.upload_file("bucket", file_obj, "object-name")
+    await storage.upload_file("bucket", file_of(content), "object-name")
 
-    mock_client.create_bucket.assert_called_once_with(Bucket="bucket")
-    mock_client.put_object.assert_called_once()
+    mock_client.create_bucket.assert_awaited_once_with(Bucket="bucket")
+    mock_client.put_object.assert_awaited_once()
     _, kwargs = mock_client.put_object.call_args
     assert kwargs["Bucket"] == "bucket"
     assert kwargs["Key"] == "object-name"
@@ -217,14 +258,9 @@ def test_upload_file_creates_bucket_when_missing_and_uploads(
     assert kwargs["ContentType"] == "application/octet-stream"
 
 
-def test_upload_file_skips_bucket_creation_when_it_exists(storage: RustFS, mock_client: MagicMock):
-    file_obj = FileObject(
-        filename="a.bin",
-        content_type="application/octet-stream",
-        size=0,
-        stream=io.BytesIO(b"x"),
-    )
+async def test_upload_file_skips_bucket_creation_when_it_exists(
+    storage: RustFS, mock_client: AsyncMock
+):
+    await storage.upload_file("bucket", file_of(b"x"), "object-name")
 
-    storage.upload_file("bucket", file_obj, "object-name")
-
-    mock_client.create_bucket.assert_not_called()
+    mock_client.create_bucket.assert_not_awaited()
