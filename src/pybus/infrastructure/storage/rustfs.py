@@ -37,6 +37,23 @@ def _is_missing(ex: ClientError) -> bool:
     return ex.response.get("Error", {}).get("Code") in _MISSING_CODES
 
 
+def _filename(key: str, content_type: str) -> str:
+    """The key's last segment, with an extension only if it has none.
+
+    This used to append the guessed extension unconditionally, so
+    `a/hello.txt` came back as `hello.txt.txt` -- and when nothing could be
+    guessed it appended `None`, which is also what every content type with a
+    parameter got, since `text/plain; charset=utf-8` is not in the table
+    `guess_extension` reads. The parameter is stripped for the lookup; an
+    unguessable type leaves the name bare rather than inventing a suffix.
+    """
+    name = Path(key).name
+    if Path(name).suffix:
+        return name
+    extension = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
+    return f"{name}{extension or ''}"
+
+
 class FileNotFound(Exception):
     """No object at that key.
 
@@ -132,7 +149,7 @@ class RustFS(Storage):
             stream=io.BytesIO(content),
             size=len(content),
             content_type=content_type,
-            filename=f"{Path(file_path).name}{mimetypes.guess_extension(content_type)}",
+            filename=_filename(file_path, content_type),
         )
 
     @override

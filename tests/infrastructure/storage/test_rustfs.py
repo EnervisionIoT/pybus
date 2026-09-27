@@ -138,6 +138,29 @@ def test_get_file_builds_file_object_from_response(storage: RustFS, mock_client:
     body.close.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("key", "content_type", "expected"),
+    [
+        # A key that has an extension keeps it, and gets no second one.
+        ("path/file.txt", "text/plain", "file.txt"),
+        ("path/report.pdf", "application/octet-stream", "report.pdf"),
+        # No extension: one is guessed from the content type...
+        ("uploads/abc123", "image/png", "abc123.png"),
+        # ...including when the type carries a parameter.
+        ("uploads/abc123", "text/plain; charset=utf-8", "abc123.txt"),
+        # Nothing to guess from: the name stays bare, not `abc123None`.
+        ("uploads/abc123", "application/x-nothing-knows-this", "abc123"),
+    ],
+)
+def test_get_file_names_the_file_after_its_key(
+    storage: RustFS, mock_client: MagicMock, key: str, content_type: str, expected: str
+):
+    mock_client.get_object.return_value = {"Body": MagicMock(), "ContentType": content_type}
+    mock_client.get_object.return_value["Body"].read.return_value = b"x"
+
+    assert storage.get_file("bucket", key).filename == expected
+
+
 @pytest.mark.parametrize("code", ["NoSuchKey", "NoSuchBucket"])
 def test_get_file_raises_file_not_found_when_the_object_is_missing(
     storage: RustFS, mock_client: MagicMock, code: str
