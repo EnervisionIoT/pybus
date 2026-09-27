@@ -1,3 +1,3 @@
-from .minio import Minio
+from .rustfs import RustFS
 
-__all__ = ["Minio"]
+__all__ = ["RustFS"]

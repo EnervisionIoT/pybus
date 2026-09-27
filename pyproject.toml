@@ -15,8 +15,8 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "pydantic>=2.12.5",
     "redis>=7.4.0",
-    "minio>=7.2.20",
     "confluent-kafka>=2.14.0",
+    "boto3>=1.40",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +49,11 @@ dev = [
     # in had a consumer that pulled the extra in.
     "pgvector>=0.4.2",
     "sqlalchemy>=2.0.49",
+    # boto3 ships no type information, so without these every call on the S3
+    # client is `Any` and mypy checks nothing about the storage adapter --
+    # the same reason types-grpcio is above. Only the `s3` extra: pybus talks
+    # to no other AWS API.
+    "boto3-stubs[s3]>=1.40",
 ]
 
 [tool.pytest.ini_options]
