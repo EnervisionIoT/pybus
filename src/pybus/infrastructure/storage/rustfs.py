@@ -185,12 +185,26 @@ class RustFS(Storage):
                 # Bytes rather than the stream. FileObject.stream is declared
                 # io.IOBase so pydantic's isinstance check accepts an
                 # io.BytesIO, and that is not a type the stubs take as a Body.
-                # Reading it out is cheap because FileObject refuses anything
-                # over 2MB.
+                # Reading it out holds the whole object in memory once more;
+                # callers bound the size, since FileObject no longer does.
                 Body=file.to_bytes(),
                 ContentLength=file.size,
                 ContentType=file.content_type,
             )
+
+    @override
+    async def delete_file(self, bucket: str, file_path: str) -> None:
+        async with self._client() as client:
+            try:
+                await client.delete_object(Bucket=bucket, Key=file_path)
+            except ClientError as ex:
+                # S3 answers 204 for a key that is not there; a missing
+                # bucket is the one absence that raises. Both mean the object
+                # is gone, so a retried delete succeeds rather than failing on
+                # the first attempt's success. Anything else is a fault.
+                if _is_missing(ex):
+                    return
+                raise
 
 
 __all__ = ["FileNotFound", "RustFS"]

@@ -264,3 +264,27 @@ async def test_upload_file_skips_bucket_creation_when_it_exists(
     await storage.upload_file("bucket", file_of(b"x"), "object-name")
 
     mock_client.create_bucket.assert_not_awaited()
+
+
+async def test_delete_file_deletes_the_object(storage: RustFS, mock_client: AsyncMock):
+    await storage.delete_file("bucket", "a/b")
+
+    mock_client.delete_object.assert_awaited_once_with(Bucket="bucket", Key="a/b")
+
+
+async def test_delete_file_of_a_missing_bucket_is_not_an_error(
+    storage: RustFS, mock_client: AsyncMock
+):
+    """S3 already answers 204 for a missing key; a missing bucket is the one
+    absence that raises. Either way the object is gone, which is what the
+    caller asked for -- and a retried delete must not fail on its own success."""
+    mock_client.delete_object.side_effect = make_client_error("NoSuchBucket", "DeleteObject")
+
+    await storage.delete_file("bucket", "a/b")
+
+
+async def test_delete_file_reraises_a_real_fault(storage: RustFS, mock_client: AsyncMock):
+    mock_client.delete_object.side_effect = make_client_error("AccessDenied", "DeleteObject")
+
+    with pytest.raises(ClientError):
+        await storage.delete_file("bucket", "a/b")

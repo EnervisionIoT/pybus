@@ -19,3 +19,8 @@ class Storage(ABC):
     @abstractmethod
     async def upload_file(self, bucket: str, file: FileObject, object_name: str) -> None:
         raise NotImplementedError()
+
+    @abstractmethod
+    async def delete_file(self, bucket: str, file_path: str) -> None:
+        """Remove an object. Absent already is success, not an error."""
+        raise NotImplementedError()

@@ -33,12 +33,18 @@ class FileObject(ValueObject):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     @model_validator(mode="after")
-    def compute_and_validate_size(self) -> "FileObject":
+    def compute_size(self) -> "FileObject":
+        """`size` is measured from the stream, never taken from the caller.
+
+        This used to refuse anything over 2MB as well. That was a policy, and
+        a value object is the wrong owner for one: the first service to use
+        `Storage` for real (utility, storing photographed bills) needs 15MB,
+        and every caller already knows its own limit better than a framework
+        constant does. Enforce size where the upload arrives.
+        """
         self.stream.seek(0, 2)
         size = self.stream.tell()
         self.stream.seek(0)
-        if size > 2 * 1024 * 1024:
-            raise ValueError("File size exceeds the maximum limit of 2MB")
         object.__setattr__(self, "size", size)
         return self
 
