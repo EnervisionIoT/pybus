@@ -1,4 +1,3 @@
-import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -389,28 +388,6 @@ async def test_execute_event_logs_and_reraises_handler_exception():
     logger.error.assert_called_once()
 
 
-async def test_publish_event_produces_to_kafka_with_correlation_id_set():
-    correlation_id = uuid.uuid4()
-    fake_producer = MagicMock(spec=AIOProducer)
-    fake_producer.produce = AsyncMock()
-
-    class C(containers.DeclarativeContainer):
-        correlation_id = providers.Dependency(instance_of=uuid.UUID)
-        kafka_producer_dep = providers.Dependency(instance_of=AIOProducer)
-
-    container = C(correlation_id=correlation_id, kafka_producer_dep=fake_producer)
-    ctx = make_context(container)
-
-    event = make_dummy_event()
-    await ctx.publish_event(event)
-
-    assert event.correlation_id == correlation_id
-    fake_producer.produce.assert_awaited_once()
-    _, kwargs = fake_producer.produce.call_args
-    assert kwargs["topic"] == TransactionContext.DOMAIN_EVENTS_TOPIC
-    assert kwargs["key"] == str(event.aggregate_id).encode("utf-8")
-
-
 async def test_enqueue_event_buffers_without_producing():
     """The collector middleware runs inside the transaction, so anything it
     produced could still be rolled back out from under. It enqueues."""
@@ -453,23 +430,7 @@ async def test_two_contexts_do_not_share_a_buffer():
     assert len(first.take_pending_events()) == 1
 
 
-async def test_a_buffered_event_still_carries_the_transactions_correlation_id():
-    """Deferring the produce must not break the tie between the Kafka message
-    and the domain_events row, which is stamped from the same provider."""
-    correlation_id = uuid.uuid4()
-    fake_producer = MagicMock(spec=AIOProducer)
-    fake_producer.produce = AsyncMock()
-
-    class C(containers.DeclarativeContainer):
-        correlation_id = providers.Dependency(instance_of=uuid.UUID)
-        kafka_producer_dep = providers.Dependency(instance_of=AIOProducer)
-
-    ctx = make_context(C(correlation_id=correlation_id, kafka_producer_dep=fake_producer))
-
-    await ctx.enqueue_event(make_dummy_event())
-    for event in ctx.take_pending_events():
-        await ctx.publish_event(event)
-
-    fake_producer.produce.assert_awaited_once()
-    _, kwargs = fake_producer.produce.call_args
-    assert json.loads(kwargs["value"])["correlation_id"] == str(correlation_id)
+def test_the_context_has_no_way_to_produce():
+    """Producing from a transaction is what the outbox relay replaced; a
+    method left here would be the one thing that could bring it back."""
+    assert not hasattr(TransactionContext, "publish_event")

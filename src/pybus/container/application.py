@@ -1,7 +1,7 @@
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import partial
-from logging import Logger
 from typing import Any, overload
 
 from confluent_kafka.aio import AIOConsumer, AIOProducer
@@ -33,11 +33,9 @@ def create_application(
 
     @application.on_enter_transaction_context
     async def on_enter_transaction_context(context: TransactionContext) -> None:  # pyright: ignore[reportUnusedFunction]
-        # Bound to `enqueue_event`, not `publish_event`, deliberately. A
-        # handler that injected this and produced directly would produce from
-        # inside the transaction, which is exactly the ordering the exit hook
-        # below exists to prevent. Nothing injects it today; binding it to the
-        # buffer means nothing can.
+        # Bound to `enqueue_event`, which only records that this transaction
+        # has events for the outbox relay to wake on. Nothing a handler can
+        # inject produces anything; the relay is the only producer.
         context.set_dependency("publish_event", context.enqueue_event)
 
     @application.on_exit_transaction_context
@@ -45,45 +43,30 @@ def create_application(
         context: TransactionContext, exc_val: BaseException | None
     ) -> None:
         session = context.get_dependency(DataBaseSession)
-        logger = context.get_dependency(Logger)
 
         try:
             if exc_val:
                 await session.rollback()
-                # Buffered events are simply never taken. Nothing that failed
-                # to commit is allowed onto the topic.
                 return
             await session.commit()
         finally:
             await session.close()
 
-        # Past here the write is durable and cannot be taken back, so a
-        # produce failure is not something the caller can act on. Raising
-        # would report a committed command as failed and invite a retry that
-        # writes it twice. Log and carry on: the row is in `domain_events`,
-        # which is the record a replay would work from.
-        for domain_event in context.take_pending_events():
-            try:
-                await context.publish_event(domain_event)
-            except Exception:
-                logger.exception(
-                    "Transaction committed but publishing %s (id=%s) failed. "
-                    "The row is in domain_events; the message is not on the topic.",
-                    domain_event.message_type,
-                    domain_event.id,
-                )
+        # The rows are durable now, and the outbox relay is what sends them.
+        # This is only latency: a wake that never comes costs at most the
+        # relay's idle interval, because it polls regardless. It used to
+        # produce here, and dropped the delivery report -- a crash after the
+        # commit lost the event with nothing to say so.
+        if context.take_pending_events():
+            application.outbox_wakeup.set()
 
     @application.transaction_middleware
     async def event_collector_middleware(  # pyright: ignore[reportUnusedFunction]
         context: TransactionContext, call_next: Callable[[], Awaitable[Any]]
     ) -> Any:
-        """Write the outbox rows and buffer what to publish -- but publish
-        nothing.
-
-        This used to produce to Kafka right here. A produce could succeed and
-        the transaction then roll back in `on_exit_transaction_context`,
-        leaving the broker holding an event the database never recorded.
-        """
+        """Write the outbox rows inside the transaction, and note that there
+        were some -- the exit hook wakes the outbox relay on that, after the
+        commit. Nothing is produced here or anywhere in a transaction."""
         result = await call_next()
 
         if isinstance(call_next, partial):
@@ -95,8 +78,8 @@ def create_application(
 
             # `save_domain_events()` stays here, inside the transaction: it
             # is destructive (it drains each aggregate's pending events) and
-            # its INSERTs belong to this unit of work. Only the Kafka produce
-            # moves -- see `TransactionContext.enqueue_event`.
+            # its INSERTs belong to this unit of work. The relay sends them once
+            # they are committed -- see `pybus.container.outbox`.
             for repository_dependency in repository_dependencies:
                 for domain_event in await repository_dependency.save_domain_events():
                     await context.enqueue_event(domain_event)
@@ -236,6 +219,11 @@ class Application(ApplicationModule):
     def __init__(self, name: str, container: ApplicationContainer):
         super().__init__(name=name)
         self._container: ApplicationContainer = container
+        # Set by the exit hook when a transaction committed events; awaited
+        # by this process's outbox relay. Lives here, on the one Application
+        # per process, rather than in the transaction container, which is
+        # instantiated -- and its providers deep-copied -- per transaction.
+        self.outbox_wakeup: asyncio.Event = asyncio.Event()
         self._on_enter_transaction_context: (
             Callable[[TransactionContext], Awaitable[None]] | None
         ) = None

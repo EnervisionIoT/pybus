@@ -48,12 +48,9 @@ def test_create_application_includes_given_modules():
 
 
 async def test_on_enter_hook_binds_publish_event_to_the_buffer():
-    """The injectable dependency is `enqueue_event`, not `publish_event`.
-
-    A handler that injected this and produced directly would produce from
-    inside the transaction -- the exact ordering the exit hook exists to
-    prevent. Binding it to the buffer means it cannot.
-    """
+    """The injectable dependency is `enqueue_event`, which only records that
+    the transaction has events. Nothing a handler can inject sends anything:
+    the outbox relay is the only producer."""
     app = build_application()
     fake_context = MagicMock()
     fake_context.set_dependency = MagicMock()
@@ -98,7 +95,7 @@ async def test_event_collector_middleware_buffers_instead_of_publishing():
 
     The middleware runs inside the transaction, so anything it produces can
     still be rolled back out from under. It writes the outbox rows and hands
-    the events to the buffer; the exit hook publishes them once the commit
+    the events to the buffer; the exit hook wakes the outbox relay once the commit
     has returned.
     """
     app = build_application()
@@ -499,18 +496,15 @@ def test_the_consumer_starts_from_the_beginning_not_the_end():
 
 
 class OrderRecorder:
-    """Records commit/rollback/close/publish in the order they happen.
+    """Records commit/rollback/close/take in the order they happen.
 
-    The regression being guarded is purely about *order*: every call the old
-    code made, the new code also makes. Only a recorder spanning both the
-    session and the publish path can tell the two apart.
+    The regression being guarded is order: nothing is handed on until the commit has returned.
     """
 
-    def __init__(self, events=(), commit_error=None, publish_error=None):
+    def __init__(self, events=(), commit_error=None):
         self.calls: list[str] = []
         self._events = list(events)
         self._commit_error = commit_error
-        self._publish_error = publish_error
         self.logger = MagicMock(spec=logging.Logger)
 
         self.session = AsyncMock()
@@ -530,31 +524,34 @@ class OrderRecorder:
         self.calls.append("take")
         return list(self._events)
 
-    async def publish_event(self, message):
-        self.calls.append(f"publish:{message.message_type}")
-        if self._publish_error:
-            raise self._publish_error
 
-
-async def test_on_exit_hook_publishes_only_after_the_commit_returns():
-    """The whole point of the change: nothing reaches Kafka until the write
-    is durable."""
+async def test_on_exit_hook_wakes_the_relay_only_after_the_commit_returns():
+    """The relay sends what is committed. Waking it before the commit would
+    only make it look for a row that is not there yet."""
     app = build_application()
     recorder = OrderRecorder(events=[make_dummy_event()])
 
     assert app._on_exit_transaction_context is not None
     await app._on_exit_transaction_context(recorder, None)
 
-    assert recorder.calls == ["commit", "close", "take", "publish:DummyEvent"]
+    assert recorder.calls == ["commit", "close", "take"]
+    assert app.outbox_wakeup.is_set()
 
 
-async def test_on_exit_hook_publishes_nothing_when_the_commit_fails():
-    """The bug, stated directly.
+async def test_on_exit_hook_produces_nothing_itself():
+    """The relay is the only producer. A produce here as well would send
+    every event twice."""
+    app = build_application()
+    recorder = OrderRecorder(events=[make_dummy_event()])
+    recorder.publish_event = AsyncMock()
 
-    Before this change the produce had already happened by the time the
-    commit ran, so a failing commit left the broker holding an event whose
-    row does not exist.
-    """
+    assert app._on_exit_transaction_context is not None
+    await app._on_exit_transaction_context(recorder, None)
+
+    recorder.publish_event.assert_not_called()
+
+
+async def test_on_exit_hook_does_not_wake_the_relay_when_the_commit_fails():
     app = build_application()
     recorder = OrderRecorder(events=[make_dummy_event()], commit_error=RuntimeError("boom"))
 
@@ -563,10 +560,10 @@ async def test_on_exit_hook_publishes_nothing_when_the_commit_fails():
         await app._on_exit_transaction_context(recorder, None)
 
     assert "close" in recorder.calls
-    assert not [call for call in recorder.calls if call.startswith("publish")]
+    assert not app.outbox_wakeup.is_set()
 
 
-async def test_on_exit_hook_publishes_nothing_when_the_transaction_rolled_back():
+async def test_on_exit_hook_does_not_wake_the_relay_when_the_transaction_rolled_back():
     app = build_application()
     recorder = OrderRecorder(events=[make_dummy_event()])
 
@@ -574,23 +571,21 @@ async def test_on_exit_hook_publishes_nothing_when_the_transaction_rolled_back()
     await app._on_exit_transaction_context(recorder, ValueError("handler blew up"))
 
     assert recorder.calls == ["rollback", "close"]
+    assert not app.outbox_wakeup.is_set()
 
 
-async def test_on_exit_hook_logs_and_continues_when_a_produce_fails():
-    """A produce failure after the commit cannot undo the write, so raising
-    would report a committed command as failed and invite a retry that
-    writes it twice."""
+async def test_on_exit_hook_does_not_wake_the_relay_for_a_transaction_with_no_events():
     app = build_application()
-    recorder = OrderRecorder(
-        events=[make_dummy_event(), make_dummy_event()],
-        publish_error=RuntimeError("broker down"),
-    )
+    recorder = OrderRecorder(events=[])
 
     assert app._on_exit_transaction_context is not None
     await app._on_exit_transaction_context(recorder, None)
 
-    assert recorder.calls.count("publish:DummyEvent") == 2
-    assert recorder.logger.exception.call_count == 2
+    assert not app.outbox_wakeup.is_set()
+
+
+def test_each_application_has_its_own_wake():
+    assert build_application().outbox_wakeup is not build_application().outbox_wakeup
 
 
 def test_the_session_and_the_outbox_relay_share_one_named_engine():

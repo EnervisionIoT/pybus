@@ -20,6 +20,7 @@ from pybus.infrastructure.database.session import DataBaseSession
 
 class TransactionContainer(containers.DeclarativeContainer):
     correlation_id: providers.Provider[UUID] = providers.Singleton(uuid.uuid4)
+    # Unused since the outbox relay became the only producer; kept so subclasses in every service do not have to change in the same release.
     kafka_producer: providers.Provider[AIOProducer] = providers.Dependency(instance_of=AIOProducer)
     # The port is the lookup key, not the thing constructed: container.py
     # registers a concrete session against it. mypy is right that an ABC cannot
@@ -330,27 +331,19 @@ class TransactionContext:
             raise
 
     async def enqueue_event(self, message: DomainEvent) -> None:
-        """Hold `message` until the transaction has actually committed.
+        """Record that this transaction raised `message`.
 
-        The event-collector middleware runs *inside* the transaction -- it
-        wraps the handler call, which is several frames inside the
-        `async with` in `Application.execute`. Producing from there means
-        Kafka can end up holding an event whose row the commit then refused:
-        the message is on the topic, the write is not in the database, and a
-        consumer acts on something that did not happen.
+        The row is already in the transaction (the event collector wrote
+        it); this is only how the exit hook learns there is something for
+        the outbox relay to send, so it can wake it after the commit.
 
-        So the collector buffers here, and the on-exit hook drains the buffer
-        after `session.commit()` has returned.
+        The buffer lives on the context because the context is the one
+        object both ends provably share: `call()` passes `self` to every
+        middleware, and `__aexit__` passes the same `self` to the exit hook.
 
-        The buffer lives on the context rather than in the dependency
-        container because the context is already the one object both ends
-        provably share: `call()` passes `self` to every middleware, and
-        `__aexit__` passes the same `self` to the exit hook.
-
-        `async` despite awaiting nothing: this is what the on-enter hook binds
-        the injectable `"publish_event"` dependency to, and that has always
-        been awaitable. Making it sync would break any handler that writes
-        `await publish_event(...)`.
+        `async` despite awaiting nothing: this is what the on-enter hook
+        binds the injectable `"publish_event"` dependency to, and that has
+        always been awaitable.
         """
         self._pending_events.append(message)
 
@@ -358,29 +351,7 @@ class TransactionContext:
         """Hand over everything buffered, and empty the buffer.
 
         Swap-and-return, the same idiom as `AggregateRoot.collect_events()`:
-        draining is the point, so a second call cannot re-publish.
+        draining is the point, so a second call cannot wake the relay twice for one commit.
         """
         pending, self._pending_events = self._pending_events, []
         return pending
-
-    async def publish_event(self, message: DomainEvent) -> None:
-        """Produce one event to Kafka. Only the on-exit hook should call this,
-        and only after the commit has returned -- see `enqueue_event`.
-
-        Note what `AIOProducer.produce` actually does: it appends to an
-        in-process batch and returns a future that resolves on delivery,
-        which this discards. The batch flushes at 1000 messages or after a
-        second of inactivity. So "published" here means "handed to the
-        client library", not "acknowledged by a broker" -- a separate gap
-        from the one `enqueue_event` closes, and one that only an outbox
-        relay reading committed rows can close properly.
-        """
-        kafka_producer = self.get_dependency(AIOProducer)
-        correlation_id: uuid.UUID = self.get_dependency("correlation_id")
-
-        message.correlation_id = correlation_id
-        await kafka_producer.produce(
-            topic=self.DOMAIN_EVENTS_TOPIC,
-            value=message.model_dump_json().encode("utf-8"),
-            key=str(message.aggregate_id).encode("utf-8"),
-        )
