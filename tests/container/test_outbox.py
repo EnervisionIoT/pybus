@@ -1,7 +1,10 @@
 import asyncio
+import gc
 import json
 import logging
 import uuid
+from functools import partial
+from typing import Self
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,6 +13,7 @@ from confluent_kafka.aio import AIOProducer
 from pybus.container import outbox
 from pybus.container.outbox import (
     publish_rows,
+    relay_once,
     run_outbox_relay,
     run_outbox_relay_for,
     wire_value,
@@ -35,6 +39,46 @@ def row_for(event: DummyEvent, correlation_id: uuid.UUID) -> dict:
         "payload": event.payload,
         "published_at": None,
     }
+
+
+def some_rows(count: int) -> list[dict]:
+    return [
+        row_for(DummyEvent(aggregate_id=uuid.uuid4(), aggregate_type="X"), uuid.uuid4())
+        for _ in range(count)
+    ]
+
+
+def producer_never_answering() -> AsyncMock:
+    """A producer whose delivery reports never arrive: the broker is gone,
+    and flush has returned with every message still in flight."""
+    producer = AsyncMock(spec=AIOProducer)
+    producer.produce.side_effect = lambda **_: asyncio.get_running_loop().create_future()
+    return producer
+
+
+class UnretrievedExceptions:
+    """Records what asyncio reports through the loop's exception handler --
+    "Future exception was never retrieved" among it -- for the duration of
+    a `with` block."""
+
+    def __init__(self) -> None:
+        self.reported: list[str] = []
+
+    def __enter__(self) -> Self:
+        self._loop = asyncio.get_running_loop()
+        self._previous = self._loop.get_exception_handler()
+        self._loop.set_exception_handler(
+            lambda _loop, context: self.reported.append(context["message"])
+        )
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._loop.set_exception_handler(self._previous)
+
+    def never_retrieved(self) -> list[str]:
+        # The report is made when the future is collected, not when it fails.
+        gc.collect()
+        return [message for message in self.reported if "never retrieved" in message]
 
 
 def acknowledged(error: Exception | None = None) -> asyncio.Future:
@@ -142,17 +186,92 @@ async def test_publish_rows_returns_only_what_the_broker_acknowledged():
 async def test_a_delivery_still_pending_after_the_grace_is_not_marked(monkeypatch):
     monkeypatch.setattr(outbox, "DELIVERY_GRACE_SECONDS", 0.01)
     row = row_for(DummyEvent(aggregate_id=uuid.uuid4(), aggregate_type="X"), uuid.uuid4())
-    pending = asyncio.get_running_loop().create_future()
+    # Held in a list so the test can let go of it: asyncio reports an
+    # unretrieved exception only when the future is collected.
+    held = [asyncio.get_running_loop().create_future()]
     producer = AsyncMock(spec=AIOProducer)
-    producer.produce.side_effect = lambda **_: pending
+    producer.produce.side_effect = lambda **_: held[0]
 
-    assert await publish_rows(producer, [row]) == []
+    with UnretrievedExceptions() as reports:
+        assert await publish_rows(producer, [row]) == []
 
-    # A refusal arriving after the round has moved on must be retrieved by
-    # the relay, not reported by asyncio as never retrieved.
-    pending.set_exception(RuntimeError("late refusal"))
-    await asyncio.sleep(0)
-    assert pending.done()
+        # A refusal arriving after the round has moved on must be retrieved by
+        # the relay, not reported by asyncio as never retrieved.
+        held[0].set_exception(RuntimeError("late refusal"))
+        await asyncio.sleep(0)
+        held.clear()
+        del producer
+
+        assert reports.never_retrieved() == []
+
+
+async def test_a_round_nothing_was_acknowledged_in_says_so_once(monkeypatch, caplog):
+    """A broker outage raises nothing: flush returns with every report still
+    in flight. Without this line an outage left no trace in the log at all,
+    while every row quietly stayed unpublished."""
+    monkeypatch.setattr(outbox, "DELIVERY_GRACE_SECONDS", 0.01)
+
+    with caplog.at_level(logging.DEBUG, logger="pybus.container.outbox"):
+        assert await publish_rows(producer_never_answering(), some_rows(3)) == []
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].name == "pybus.container.outbox"
+    assert "0 of 3" in warnings[0].getMessage()
+
+
+async def test_a_partly_refused_batch_warns_once_and_names_rows_only_at_debug(caplog):
+    """A refused batch of a hundred must not log a hundred warnings."""
+    rows = some_rows(3)
+    producer = producer_acknowledging(None, RuntimeError("refused"), None)
+
+    with caplog.at_level(logging.DEBUG, logger="pybus.container.outbox"):
+        await publish_rows(producer, rows)
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "2 of 3" in warnings[0].getMessage()
+    per_row = [r for r in caplog.records if str(rows[1]["id"]) in r.getMessage()]
+    assert [r.levelno for r in per_row] == [logging.DEBUG]
+
+
+async def test_a_fully_acknowledged_batch_logs_no_warning(caplog):
+    with caplog.at_level(logging.DEBUG, logger="pybus.container.outbox"):
+        await publish_rows(producer_acknowledging(), some_rows(3))
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+@pytest.mark.parametrize("failing", ["produce", "flush"])
+async def test_a_batch_that_raises_leaves_no_unretrieved_futures(failing):
+    """The futures produced before the failure still resolve later -- the
+    library puts a failed batch back in its buffer -- and with nobody
+    holding them asyncio would report each as never retrieved."""
+    created: list[asyncio.Future] = []
+
+    def produce(**_):
+        if failing == "produce" and len(created) == 2:
+            raise RuntimeError("produce refused")
+        created.append(asyncio.get_running_loop().create_future())
+        return created[-1]
+
+    producer = AsyncMock(spec=AIOProducer)
+    producer.produce.side_effect = produce
+    if failing == "flush":
+        producer.flush.side_effect = RuntimeError("flush refused")
+
+    with UnretrievedExceptions() as reports:
+        with pytest.raises(RuntimeError, match="refused") as raised:
+            await publish_rows(producer, some_rows(3))
+
+        assert created
+        for future in created:
+            future.set_exception(RuntimeError("late refusal"))
+        await asyncio.sleep(0)
+        created.clear()
+        del raised, producer
+
+        assert reports.never_retrieved() == []
 
 
 async def test_publish_rows_with_nothing_to_send_touches_no_producer():
@@ -163,11 +282,83 @@ async def test_publish_rows_with_nothing_to_send_touches_no_producer():
     producer.flush.assert_not_called()
 
 
+# --- relay_once ---------------------------------------------------------------
+
+
+class FakeSession:
+    """Stands in for `AsyncSession(engine)`: every claim hands back `rows`
+    again, as the real claim does while they stay unmarked."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.claims = 0
+        self.marked: list[list[uuid.UUID]] = []
+
+    def __call__(self, _engine: object) -> "FakeSession":
+        return self
+
+    def begin(self) -> "FakeSession":
+        return self
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def execute(self, statement, parameters):
+        if "outbox_claim" in str(statement):
+            self.claims += 1
+            result = MagicMock()
+            result.mappings.return_value = [dict(row) for row in self.rows]
+            return result
+        self.marked.append(list(parameters["ids"]))
+        return MagicMock()
+
+
+async def test_relay_once_marks_and_reports_only_what_was_delivered(monkeypatch):
+    rows = some_rows(2)
+    session = FakeSession(rows)
+    monkeypatch.setattr(outbox, "AsyncSession", session)
+    producer = producer_acknowledging(None, RuntimeError("refused"))
+
+    assert await relay_once(MagicMock(), producer, "iam") == 1
+    assert session.marked == [[rows[0]["id"]]]
+
+
+async def test_an_outage_does_not_keep_the_relay_draining(monkeypatch):
+    """A full batch claimed and none of it delivered is not "more are
+    waiting": the same rows would be claimed again at once, and the relay
+    would run back-to-back flush timeouts for the whole outage."""
+    monkeypatch.setattr(outbox, "DELIVERY_GRACE_SECONDS", 0.01)
+    session = FakeSession(some_rows(2))
+    monkeypatch.setattr(outbox, "AsyncSession", session)
+    producer = producer_never_answering()
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(
+        run_outbox_relay(
+            partial(relay_once, MagicMock(), producer, "iam", batch_size=2),
+            producer,
+            asyncio.Event(),
+            stop,
+            batch_size=2,
+            idle_interval=60,
+        )
+    )
+    await asyncio.sleep(0.2)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert session.claims == 1
+
+
 # --- run_outbox_relay ---------------------------------------------------------
 
 
 def rounds(*counts: int | Exception, then_stop: asyncio.Event) -> AsyncMock:
-    """A relay round reporting `counts` in turn; sets `then_stop` on the last."""
+    """A relay round reporting `counts` delivered in turn; sets `then_stop`
+    on the last."""
     remaining = list(counts)
 
     async def round_() -> int:

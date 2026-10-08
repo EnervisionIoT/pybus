@@ -100,23 +100,44 @@ async def publish_rows(
     later round -- whether the broker refused it or simply had not answered
     yet. Sending a message twice is the accepted cost; marking one that
     never arrived is the failure this module exists to remove.
+
+    When `produce` or `flush` raises, the library puts the failed batch back
+    in its buffer and may still send it later -- a second source of
+    duplicates on top of the next round's re-claim, accepted under the same
+    at-least-once.
     """
     if not rows:
         return []
 
-    futures: list[asyncio.Future[Any]] = [
-        await producer.produce(
-            topic=TransactionContext.DOMAIN_EVENTS_TOPIC,
-            key=str(row["aggregate_id"]).encode("utf-8"),
-            value=wire_value(row),
-        )
-        for row in rows
-    ]
-    await producer.flush(flush_timeout)
-    # Delivery reports arrive on librdkafka's thread and reach these futures
-    # through the event loop, so a flush that has returned can leave some
-    # not yet resolved. Without the wait, those rows would be sent again on
-    # every round however healthy the broker was.
+    futures: list[asyncio.Future[Any]] = []
+    try:
+        for row in rows:
+            futures.append(
+                await producer.produce(
+                    topic=TransactionContext.DOMAIN_EVENTS_TOPIC,
+                    key=str(row["aggregate_id"]).encode("utf-8"),
+                    value=wire_value(row),
+                )
+            )
+        await producer.flush(flush_timeout)
+    except BaseException:
+        # The round is abandoned, but the futures already handed out still
+        # resolve whenever the library gets to them; unheld, each refusal
+        # would be reported by asyncio as never retrieved.
+        for future in futures:
+            future.add_done_callback(_retrieve_outcome)
+        raise
+    # A delivery report is not delivered through the event loop: librdkafka
+    # serves it inside flush (or poll), on the AIOProducer's executor thread,
+    # and its callback sets the future there and then. So a flush that
+    # returned in time has resolved everything, and this wait costs nothing.
+    # It matters only when flush hit its timeout with reports still in
+    # flight -- which, with `message.timeout.ms` equal to that timeout, is
+    # the ordinary shape of a broker outage. The only thing that serves a
+    # report after that is the AIOProducer's buffer-timeout task, a
+    # non-blocking flush about once a second; one landing inside the grace
+    # is counted, and one that does not is simply not marked this round and
+    # is sent again by a later one.
     await asyncio.wait(futures, timeout=DELIVERY_GRACE_SECONDS)
 
     delivered: list[uuid.UUID] = []
@@ -124,13 +145,25 @@ async def publish_rows(
         if not future.done():
             future.add_done_callback(_retrieve_outcome)
         elif future.cancelled() or future.exception() is not None:
-            logger.warning(
+            # Debug, not warning: a refused batch would otherwise log one
+            # line per row, a hundred at a time. The summary below is the
+            # warning.
+            logger.debug(
                 "Broker did not acknowledge %s id=%s; it stays unpublished",
                 row["message_type"],
                 row["id"],
             )
         else:
             delivered.append(row["id"])
+    if len(delivered) < len(rows):
+        # The one line an outage leaves: flush raises nothing when the
+        # broker is gone, it only returns with the reports unresolved.
+        logger.warning(
+            "Outbox relay: broker acknowledged %d of %d rows; "
+            "the rest stay unpublished and will be sent again",
+            len(delivered),
+            len(rows),
+        )
     return delivered
 
 
@@ -153,8 +186,13 @@ async def relay_once(
     flush_timeout: float = FLUSH_TIMEOUT_SECONDS,
 ) -> int:
     """One round: claim up to `batch_size` rows, send them, mark the ones
-    the broker acknowledged. Returns how many were claimed, so the caller
-    knows whether a full batch suggests more are waiting.
+    the broker acknowledged. Returns how many were marked.
+
+    Not how many were claimed: the caller reads a full batch as "more are
+    waiting, go again at once", and a full batch claimed during an outage
+    and none of it delivered would be claimed again at once -- back-to-back
+    flush timeouts for as long as the broker is gone, never idling. With an
+    acknowledging broker the two counts are the same.
 
     Claim, produce and mark share one transaction because the claim's row
     locks are what keep another replica off these rows; they are released
@@ -177,7 +215,7 @@ async def relay_once(
                 text(f"SELECT {schema}.outbox_mark_published(CAST(:ids AS uuid[]))"),
                 {"ids": delivered},
             )
-    return len(rows)
+    return len(delivered)
 
 
 async def _sleep(timeout: float, *events: asyncio.Event) -> None:
@@ -202,11 +240,17 @@ async def run_outbox_relay(
 ) -> None:
     """Run rounds until `stop_event` is set. Never raises.
 
+    `relay_round` returns how many rows it delivered; a full batch of them
+    means more may be waiting, and the next round starts at once.
+
     It shares an `asyncio.gather` with the gRPC server, so an exception out
-    of here would stop the service. A round that fails -- database gone,
-    broker gone -- is logged and retried after `error_backoff`, its rows
-    still unpublished. The first round runs at once, which is what sends
-    whatever an earlier process committed and never got out.
+    of here would stop the service. A broker outage is not an exception:
+    the round returns with nothing marked, `publish_rows` warns, and the
+    relay idles as it would with nothing to send. Only a round that raises
+    -- database gone, a produce that fails -- is logged and retried after
+    `error_backoff`, its rows still unpublished. The first round runs at
+    once, which is what sends whatever an earlier process committed and
+    never got out.
 
     Between rounds it waits for `wakeup` (set by every transaction that
     committed an event) or `idle_interval`, whichever comes first: the wake
