@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import DateTime
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,3 +30,9 @@ class DomainEvent(Base):
     version: Mapped[int | None] = mapped_column(nullable=True)
     created_by_id: Mapped[UUID | None] = mapped_column(nullable=True)
     payload: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    # Set by the outbox relay, through the service's `outbox_mark_published`
+    # function, once the broker has acknowledged the row -- never by
+    # `save_domain_events`, so every new row starts unpublished. Declared
+    # here so the ORM agrees with each service's migration; nothing in pybus
+    # reads it through the ORM.
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

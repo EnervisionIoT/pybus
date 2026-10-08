@@ -6,7 +6,7 @@ from typing import Any, overload
 
 from confluent_kafka.aio import AIOConsumer, AIOProducer
 from dependency_injector import containers, providers
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from pybus.application import ApplicationModule
 from pybus.application.commands import Command
@@ -19,6 +19,7 @@ from pybus.infrastructure.database.sqlalchemy import SqlAlchemySession
 from pybus.infrastructure.logging import init_logger
 
 from .config import ApplicationSettings
+from .outbox import FLUSH_TIMEOUT_SECONDS
 from .transaction import DependencyProvider, TransactionContainer, TransactionContext
 
 
@@ -119,7 +120,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
     """Subclass redeclaration footgun: if a subclass redeclares `config` as a new
     `providers.Dependency(...)` object (instead of aliasing it), the other inherited
-    providers that reference `config.provided.X` (`application`, `session`,
+    providers that reference `config.provided.X` (`application`, `engine`,
     `kafka_producer`, `logger`) still point at the ORIGINAL base class's `config`
     object. The subclass's `config=` constructor kwarg never reaches them because
     provider references are captured at class-declaration time, before instance
@@ -132,7 +133,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
        in your subclass. This works because `providers.Dependency(instance_of=ApplicationSettings)`
        accepts subclass instances via `isinstance` checks (see `test_dependency_accepts_subclass`).
     2. Redeclare all dependent providers together: if you redeclare `config`, you must
-       also redeclare all providers that reference it (`application`, `session`,
+       also redeclare all providers that reference it (`application`, `engine`,
        `kafka_producer`, `logger`) in the SAME subclass body so they capture the new
        `config` reference.
     """
@@ -148,15 +149,18 @@ class ApplicationContainer(containers.DeclarativeContainer):
         modules=application_modules,
     )
 
+    engine: providers.Provider[AsyncEngine] = providers.Singleton(
+        create_async_engine,
+        url=providers.Callable(str, config.provided.SQLALCHEMY_DATABASE_URI),
+    )
+    """Named because two things need it: every transaction's session, and
+    the outbox relay, which opens sessions of its own outside any handler.
+    It used to be an anonymous Singleton inside `session`, reachable only by
+    position (`session.providers["sqlalchemy"].kwargs["engine"]`)."""
+
     session: providers.Provider[DataBaseSession] = providers.Selector(
         config.provided.DATABASE_TYPE,
-        sqlalchemy=providers.Factory(
-            SqlAlchemySession,
-            engine=providers.Singleton(
-                create_async_engine,
-                url=providers.Callable(str, config.provided.SQLALCHEMY_DATABASE_URI),
-            ),
-        ),
+        sqlalchemy=providers.Factory(SqlAlchemySession, engine=engine),
     )
 
     kafka_producer: providers.Provider[AIOProducer] = providers.Singleton(
@@ -167,7 +171,19 @@ class ApplicationContainer(containers.DeclarativeContainer):
         # actually gets resolved instead of passed through as a Provider
         # object.
         producer_conf=providers.Dict(
-            {"bootstrap.servers": config.provided.KAFKA_BOOTSTRAP_SERVERS}
+            {
+                "bootstrap.servers": config.provided.KAFKA_BOOTSTRAP_SERVERS,
+                # The outbox relay marks a row published on the delivery
+                # report, so the report has to mean the write survives a
+                # broker failover, and a retry inside librdkafka must not
+                # put the message on the topic twice.
+                "acks": "all",
+                "enable.idempotence": True,
+                # Equal to the relay's flush timeout: a message the relay
+                # has stopped waiting for -- its row left unpublished, to be
+                # sent again -- must not still be delivered behind its back.
+                "message.timeout.ms": int(FLUSH_TIMEOUT_SECONDS * 1000),
+            }
         ),
     )
 

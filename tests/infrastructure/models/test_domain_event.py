@@ -14,6 +14,7 @@ def test_domain_event_model_has_expected_columns():
         "version",
         "created_by_id",
         "payload",
+        "published_at",
     }
 
 

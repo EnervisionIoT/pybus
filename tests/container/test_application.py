@@ -591,3 +591,38 @@ async def test_on_exit_hook_logs_and_continues_when_a_produce_fails():
 
     assert recorder.calls.count("publish:DummyEvent") == 2
     assert recorder.logger.exception.call_count == 2
+
+
+def test_the_session_and_the_outbox_relay_share_one_named_engine():
+    """The relay opens its own sessions, outside any handler. It must draw
+    from the same engine -- and pool -- as every transaction, not build a
+    second one per process."""
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings())
+    # A real engine needs psycopg, which pybus does not declare: the services
+    # bring it, and this suite never connects. Stubbing the provider still
+    # exercises the wiring the assertions below are about.
+    engine = MagicMock()
+    container.engine.override(engine)
+
+    assert container.engine() is engine
+    assert container.session.providers["sqlalchemy"].kwargs["engine"] is container.engine
+
+
+def test_the_producer_waits_for_every_replica_and_never_duplicates_on_retry():
+    """The relay marks a row published on the delivery report. That report
+    has to mean the write survives a broker failover (`acks=all`), and a
+    retry inside librdkafka must not write the message twice
+    (`enable.idempotence`). `message.timeout.ms` matches the relay's flush
+    timeout, so a message the relay has given up on cannot still be
+    delivered behind its back."""
+    from pybus.container.outbox import FLUSH_TIMEOUT_SECONDS
+
+    container = ApplicationContainer()
+    container.config.override(ApplicationSettings(KAFKA_BOOTSTRAP_SERVERS="localhost:9092"))
+
+    conf = container.kafka_producer.kwargs["producer_conf"]()
+
+    assert conf["acks"] == "all"
+    assert conf["enable.idempotence"] is True
+    assert conf["message.timeout.ms"] == int(FLUSH_TIMEOUT_SECONDS * 1000)
