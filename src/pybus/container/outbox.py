@@ -26,7 +26,6 @@ repository.
 
 import asyncio
 import logging
-import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import partial
@@ -37,6 +36,7 @@ from pydantic_core import to_json
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from .loops import interruptible_sleep, plain_schema
 from .transaction import TransactionContext
 
 if TYPE_CHECKING:
@@ -63,8 +63,6 @@ ENVELOPE_COLUMNS = (
     "created_by_id",
     "tenant_id",
 )
-
-_PLAIN_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]*")
 
 
 def wire_value(row: Mapping[str, Any]) -> bytes:
@@ -167,16 +165,6 @@ async def publish_rows(
     return delivered
 
 
-def _plain_schema(schema: str) -> str:
-    # Interpolated into SQL: a schema name cannot be a bind parameter.
-    if not _PLAIN_IDENTIFIER.fullmatch(schema):
-        raise ValueError(
-            f"POSTGRES_SCHEMA {schema!r} is not a plain lowercase identifier; "
-            "the outbox relay will not interpolate it into SQL"
-        )
-    return schema
-
-
 async def relay_once(
     engine: AsyncEngine,
     producer: AIOProducer,
@@ -201,7 +189,7 @@ async def relay_once(
     flush, which `flush_timeout` and the producer's `message.timeout.ms`
     bound together.
     """
-    schema = _plain_schema(schema)
+    schema = plain_schema(schema)
     async with AsyncSession(engine) as session, session.begin():
         result = await session.execute(
             text(f"SELECT * FROM {schema}.outbox_claim(:batch)"), {"batch": batch_size}
@@ -216,15 +204,6 @@ async def relay_once(
                 {"ids": delivered},
             )
     return len(delivered)
-
-
-async def _sleep(timeout: float, *events: asyncio.Event) -> None:
-    waiters = [asyncio.ensure_future(event.wait()) for event in events]
-    try:
-        await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        for waiter in waiters:
-            waiter.cancel()
 
 
 async def run_outbox_relay(
@@ -269,9 +248,9 @@ async def run_outbox_relay(
                         break
             except Exception:
                 logger.exception("Outbox relay round failed; its rows stay unpublished")
-                await _sleep(error_backoff, stop_event)
+                await interruptible_sleep(error_backoff, stop_event)
                 continue
-            await _sleep(idle_interval, stop_event, wakeup)
+            await interruptible_sleep(idle_interval, stop_event, wakeup)
     finally:
         try:
             await producer.flush(flush_timeout)
@@ -285,7 +264,7 @@ async def run_outbox_relay_for(
     """`run_outbox_relay` wired from a service's container: its engine, its
     producer, its schema, and the wake its application sets on commit. One
     line in each service's `asyncio.gather`."""
-    schema = _plain_schema(container.config().POSTGRES_SCHEMA)
+    schema = plain_schema(container.config().POSTGRES_SCHEMA)
     producer = container.kafka_producer()
     await run_outbox_relay(
         partial(relay_once, container.engine(), producer, schema),
