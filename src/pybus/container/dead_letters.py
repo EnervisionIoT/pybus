@@ -113,7 +113,9 @@ def peek_envelope(value: bytes) -> tuple[str | None, uuid.UUID | None]:
     to tell one dead letter from another by."""
     try:
         data = json.loads(value)
-    except ValueError:
+    # A deep enough payload raises RecursionError, not ValueError; one hostile
+    # message must not crash the consumer into a restart loop on its offset.
+    except (ValueError, RecursionError):
         return None, None
     if not isinstance(data, dict):
         return None, None
