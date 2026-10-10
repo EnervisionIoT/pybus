@@ -18,10 +18,12 @@ token. `describe_error` is the one place an exception becomes text, for the
 log and for the `error` column alike.
 """
 
+import argparse
+import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -36,7 +38,7 @@ from pybus.domain.events import DomainEvent
 from .loops import plain_schema
 
 if TYPE_CHECKING:
-    from .application import Application
+    from .application import Application, ApplicationContainer
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ class ReplayOutcome:
 
 
 def _storable(text: str) -> str:
-    """Postgres 	ext refuses NUL and the driver cannot encode a lone surrogate,
+    """Postgres `text` refuses NUL and the driver cannot encode a lone surrogate,
     so a dead letter carrying either could never be written and the consumer
     would stop on it for good, again after every restart."""
     return text.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")
@@ -283,11 +285,127 @@ async def discard_dead_letters(
     return discarded
 
 
+# --- The console script ---------------------------------------------------------
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="List, replay or discard what this service's consumer could not process."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list", help="what is waiting, oldest first -- never the message itself")
+    replay = commands.add_parser(
+        "replay", help="run each message once more; a row that goes through is deleted"
+    )
+    replay.add_argument("ids", nargs="*", type=uuid.UUID, metavar="id")
+    replay.add_argument("--all", action="store_true", help="every row, oldest first")
+    discard = commands.add_parser("discard", help="delete without replaying")
+    discard.add_argument("ids", nargs="+", type=uuid.UUID, metavar="id")
+    return parser
+
+
+def _one_line(error: str, width: int = 100) -> str:
+    first = error.splitlines()[0] if error else ""
+    return first if len(first) <= width else first[: width - 3] + "..."
+
+
+def _print_list(letters: Sequence[DeadLetterSummary]) -> None:
+    if not letters:
+        print("No dead letters.")
+        return
+    for letter in letters:
+        print(
+            "  ".join(
+                (
+                    str(letter.id),
+                    letter.first_failed_at.isoformat(timespec="seconds"),
+                    f"attempts={letter.attempts}",
+                    letter.message_type or "-",
+                    str(letter.event_id or "-"),
+                    _one_line(letter.error),
+                )
+            )
+        )
+
+
+def _print_outcome(outcome: ReplayOutcome) -> None:
+    if outcome.status == "replayed":
+        print(f"{outcome.id}  replayed")
+    elif outcome.status == "failed":
+        print(f"{outcome.id}  failed: {_one_line(outcome.error or '')}")
+    else:
+        print(f"{outcome.id}  not found, or being replayed by someone else")
+
+
+async def _run(
+    build: Callable[[], "ApplicationContainer"],
+    on_exit: Callable[[], Awaitable[None]] | None,
+    args: argparse.Namespace,
+) -> int:
+    container = build()
+    container.logger()
+    engine = container.engine()
+    schema = container.config().POSTGRES_SCHEMA
+    try:
+        if args.command == "list":
+            _print_list(await list_dead_letters(engine, schema))
+            return 0
+        if args.command == "replay":
+            ids = (
+                [letter.id for letter in await list_dead_letters(engine, schema)]
+                if args.all
+                else args.ids
+            )
+            if not ids:
+                print("No dead letters.")
+                return 0
+            outcomes = await replay_dead_letters(container.application(), engine, schema, ids)
+            for outcome in outcomes:
+                _print_outcome(outcome)
+            return 0 if all(outcome.status == "replayed" for outcome in outcomes) else 1
+        discarded = await discard_dead_letters(engine, schema, args.ids)
+        for dead_letter_id in args.ids:
+            print(
+                f"{dead_letter_id}  {'discarded' if dead_letter_id in discarded else 'not found'}"
+            )
+        return 0 if len(discarded) == len(args.ids) else 1
+    finally:
+        if on_exit is not None:
+            await on_exit()
+        await engine.dispose()
+
+
+def dead_letters_main(
+    build: Callable[[], "ApplicationContainer"],
+    *,
+    on_exit: Callable[[], Awaitable[None]] | None = None,
+    argv: Sequence[str] | None = None,
+) -> None:
+    """The body of every service's `<svc>-dead-letters` console script.
+
+    `build` is the service's own container factory, and connecting as the
+    role its server connects as is the service's job, not this module's:
+    only the service knows how its server drops privilege, and a replay
+    run as the migration superuser would write past every row-security
+    policy with nothing raised. `on_exit` closes what a replayed handler
+    may have opened process-wide, on the loop that opened it.
+
+    Exits 0 when everything asked for went through, 1 when anything did
+    not, 2 on a usage error -- so a script can tell.
+    """
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command == "replay" and bool(args.ids) == args.all:
+        parser.error("replay takes ids or --all, not both and not neither")
+    raise SystemExit(asyncio.run(_run(build, on_exit, args)))
+
+
 __all__ = [
     "RECORD_SIGNATURE",
     "DeadLetter",
     "DeadLetterSummary",
     "ReplayOutcome",
+    "dead_letters_main",
     "describe_error",
     "discard_dead_letters",
     "list_dead_letters",
