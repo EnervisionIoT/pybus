@@ -17,6 +17,8 @@ from pybus.application.queries import Query
 from pybus.domain.events import DomainEvent
 from pybus.infrastructure.database.session import DataBaseSession
 
+from .errors import describe_error
+
 
 class TransactionContainer(containers.DeclarativeContainer):
     correlation_id: providers.Provider[UUID] = providers.Singleton(uuid.uuid4)
@@ -52,6 +54,12 @@ def _describe(message: Any) -> str:
     silent and retroactive -- every log already written keeps the secret in
     it. Naming the message and nothing else is the only rule that survives a
     schema nobody reviewed for this.
+
+    The error beside it goes through `describe_error` for the same reason:
+    `str()` of a SQLAlchemy StatementError carries the statement's
+    parameters, and of a pydantic ValidationError the value it refused, so
+    the input reached the log by way of the error instead -- for a consumed
+    event, an invitation token, once per attempt and again on every replay.
     """
     return f"{type(message).__name__} id={getattr(message, 'id', '?')}"
 
@@ -282,7 +290,7 @@ class TransactionContext:
                 return await self.call(handler, command)
         except Exception as ex:
             self._dependency_provider.get_dependency(Logger).error(
-                f"Executing {_describe(command)} failed with error: {ex}"
+                f"Executing {_describe(command)} failed with error: {describe_error(ex)}"
             )
             raise
 
@@ -311,7 +319,7 @@ class TransactionContext:
                 return await self.call(handler, query, pagination)
         except Exception as ex:
             self._dependency_provider.get_dependency(Logger).error(
-                f"Executing {_describe(query)} failed with error: {ex}"
+                f"Executing {_describe(query)} failed with error: {describe_error(ex)}"
             )
             raise
 
@@ -326,7 +334,7 @@ class TransactionContext:
                 await self.call(handler, event)
         except Exception as ex:
             self._dependency_provider.get_dependency(Logger).error(
-                f"Executing {_describe(event)} failed with error: {ex}"
+                f"Executing {_describe(event)} failed with error: {describe_error(ex)}"
             )
             raise
 

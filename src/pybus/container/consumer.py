@@ -35,8 +35,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from confluent_kafka.aio import AIOConsumer
-from pydantic import ValidationError
-from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from pybus.domain.events import DomainEvent
@@ -44,11 +42,11 @@ from pybus.domain.events import DomainEvent
 from .application import Application, ApplicationContainer
 from .dead_letters import (
     DeadLetter,
-    describe_error,
     peek_envelope,
     record_dead_letter,
     require_dead_letters_installed,
 )
+from .errors import describe_error, quotes_input
 from .loops import interruptible_sleep, plain_schema
 from .transaction import TransactionContext
 
@@ -74,20 +72,6 @@ def _backoff(schedule: Sequence[float], attempt: int) -> float:
     return schedule[min(attempt, len(schedule)) - 1]
 
 
-def _quotes_input(error: BaseException) -> bool:
-    seen: set[int] = set()
-    pending: list[BaseException | None] = [error]
-    while pending:
-        link = pending.pop()
-        if link is None or id(link) in seen:
-            continue
-        seen.add(id(link))
-        if isinstance(link, (ValidationError, StatementError)):
-            return True
-        pending.extend((link.__cause__, link.__context__))
-    return False
-
-
 def _log_failure(message: str, *args: object, error: Exception) -> None:
     """Log at ERROR, with the traceback unless the error or anything it chains quotes its input.
 
@@ -100,7 +84,7 @@ def _log_failure(message: str, *args: object, error: Exception) -> None:
     IntegrityError and raises a domain error would otherwise put the
     parameters back into the log through the link underneath.
     """
-    exc_info = None if _quotes_input(error) else error
+    exc_info = None if quotes_input(error) else error
     logger.error(message, *args, describe_error(error), exc_info=exc_info)
 
 
@@ -190,6 +174,17 @@ async def _record(
     further than this message. A database that is down is what every
     handler is waiting on anyway, so this waits for it too, rather than
     dropping the one message it could not keep.
+
+    Nothing polls while this loops, so an outage longer than the consumer's
+    `max.poll.interval.ms` (300 s by default) takes it out of its group, and
+    the commit after the write finally lands raises `KafkaException` and
+    ends the process. That is the accepted cost, not an oversight: the
+    restart policy brings the service back, the message is delivered again,
+    and the write this loop already made is keyed on the message's
+    position, so `dead_letter_record` takes the second one as a no-op.
+    Polling from inside the loop to stay in the group would hand over
+    messages this one is still blocking, and pausing the assignment to
+    avoid that is machinery for a case the restart already covers.
     """
     while True:
         try:

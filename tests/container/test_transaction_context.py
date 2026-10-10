@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from confluent_kafka.aio import AIOProducer
 from dependency_injector import containers, providers
+from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from pybus.application.commands import Command
 from pybus.application.common.exceptions import NoHandlerFound
@@ -292,6 +294,69 @@ async def test_a_failed_message_is_named_in_the_log_but_never_printed():
         # row and to every other line the same unit of work produced.
         assert type(message).__name__ in logged
         assert str(message.id) in logged
+
+
+class _Strict(BaseModel):
+    count: int
+
+
+def _integrity_error() -> IntegrityError:
+    return IntegrityError(
+        "INSERT INTO invitations VALUES (%(token)s)",
+        {"token": "secret-token-XYZ"},
+        Exception("duplicate key"),
+    )
+
+
+def _validation_error() -> ValidationError:
+    try:
+        _Strict.model_validate({"count": "secret-token-XYZ"})
+    except ValidationError as error:
+        return error
+    raise AssertionError("unreachable: the input is not an int")
+
+
+@pytest.mark.parametrize(
+    "make_error", [_integrity_error, _validation_error], ids=["sql", "pydantic"]
+)
+async def test_a_failed_handler_s_error_is_logged_without_the_input_it_quotes(
+    make_error, caplog: pytest.LogCaptureFixture
+):
+    """Naming the message was half of it; the error after it was still
+    `str(ex)`. A StatementError's carries the statement's parameters and a
+    ValidationError's the value it refused -- for an event off the topic,
+    an invitation token, printed once per consumer attempt and again on
+    every replay."""
+    error = make_error()
+
+    async def fail_command(message: Secretive) -> None:
+        raise error
+
+    async def fail_query(message: SecretiveQuery) -> None:
+        raise error
+
+    async def fail_event(message: SecretiveEvent) -> None:
+        raise error
+
+    for execute, message, handler in (
+        ("execute_command", Secretive(), fail_command),
+        ("execute_query", SecretiveQuery(), fail_query),
+        ("execute_event", SecretiveEvent(aggregate_id=uuid.uuid4()), fail_event),
+    ):
+        caplog.clear()
+        ctx = make_context(container_with_logger(logging.getLogger("pybus.test.transaction")))
+        ctx.configure(handlers_iterator=lambda _m, h=handler: iter([h]))
+
+        with (
+            caplog.at_level(logging.ERROR, logger="pybus.test.transaction"),
+            pytest.raises(type(error)) as raised,
+        ):
+            await getattr(ctx, execute)(message)
+
+        assert raised.value is error, f"{execute} no longer propagates the handler's error"
+        assert caplog.records, f"{execute} stopped logging the failure"
+        assert "secret-token-XYZ" not in caplog.text, f"{execute} logged the input"
+        assert type(error).__name__ in caplog.text
 
 
 async def test_no_handler_found_does_not_print_the_message_either():

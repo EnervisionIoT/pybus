@@ -151,6 +151,70 @@ def test_a_database_error_is_described_without_its_parameters():
     assert describe_error(error) == "IntegrityError: Exception: duplicate key"
 
 
+class FakeDiag:
+    def __init__(self, **fields: str | None) -> None:
+        self.message_primary = fields.get("message_primary")
+        self.sqlstate = fields.get("sqlstate")
+        self.constraint_name = fields.get("constraint_name")
+
+
+class UniqueViolation(Exception):
+    """Shaped like psycopg's: `str()` is the server's whole message, DETAIL
+    and all, and `diag` holds it field by field."""
+
+    def __init__(self, diag: FakeDiag) -> None:
+        super().__init__(
+            'duplicate key value violates unique constraint "uq_x"\n'
+            "DETAIL:  Key (token)=(secret-token-XYZ) already exists."
+        )
+        self.diag = diag
+
+
+def test_a_driver_error_is_described_by_its_primary_message_never_its_detail():
+    """psycopg's DETAIL quotes the key, or with `Failing row contains` the
+    whole row; the primary message and the codes name the failure without it."""
+    orig = UniqueViolation(
+        FakeDiag(
+            message_primary='duplicate key value violates unique constraint "uq_x"',
+            sqlstate="23505",
+            constraint_name="uq_x",
+        )
+    )
+    error = IntegrityError("INSERT INTO x VALUES (%(v)s)", {"v": "secret-token-XYZ"}, orig)
+
+    described = describe_error(error)
+
+    assert described == (
+        "IntegrityError: UniqueViolation: duplicate key value violates unique constraint "
+        '"uq_x" [sqlstate=23505, constraint=uq_x]'
+    )
+    assert "secret-token-XYZ" not in describe_error(orig)
+
+
+def test_a_driver_error_without_codes_is_its_primary_message_alone():
+    orig = UniqueViolation(FakeDiag(message_primary="connection lost"))
+
+    assert describe_error(orig) == "UniqueViolation: connection lost"
+
+
+def test_a_described_error_is_capped():
+    """The column and the log line both take it whole; an error message has
+    no length the consumer controls."""
+    described = describe_error(ValueError("x" * 10_000))
+
+    assert len(described) <= 2000
+
+
+def test_an_error_s_own_lines_are_kept():
+    assert describe_error(ValueError("first\nsecond")) == "ValueError: first\nsecond"
+
+
+def test_a_message_type_cannot_forge_a_log_line():
+    message_type, _ = peek_envelope(b'{"message_type": "A\\nERROR forged\\rline"}')
+
+    assert message_type == "A ERROR forged line"
+
+
 def test_any_other_error_is_its_class_and_message():
     assert describe_error(KeyError("message_type")) == "KeyError: 'message_type'"
 
@@ -175,8 +239,16 @@ def test_peek_gives_none_where_the_bytes_do_not_say(value):
 # --- the start-up check and record --------------------------------------------
 
 
+def installed(present: bool, executable: bool | None) -> MagicMock:
+    row = MagicMock()
+    row.present = present
+    row.executable = executable
+    row.role = "iam_app"
+    return row
+
+
 async def test_a_missing_record_function_refuses_to_start(session_answering):
-    session = session_answering(to_regprocedure=False)
+    session = session_answering(to_regprocedure=[installed(False, None)])
 
     with pytest.raises(RuntimeError, match="dead_letters migration"):
         await require_dead_letters_installed(MagicMock(), "iam")
@@ -188,8 +260,22 @@ async def test_a_missing_record_function_refuses_to_start(session_answering):
     }
 
 
+async def test_a_record_function_this_role_cannot_execute_refuses_to_start(session_answering):
+    """A GRANT naming another role than the one the server runs as passes
+    an existence check, then wedges the record loop on the first failure."""
+    session = session_answering(to_regprocedure=[installed(True, False)])
+
+    with pytest.raises(RuntimeError, match="cannot execute") as refused:
+        await require_dead_letters_installed(MagicMock(), "iam")
+
+    assert "iam_app" in str(refused.value)
+    assert "IAM_APP_POSTGRES_USER" in str(refused.value)
+    [(sql, _)] = session.calls
+    assert "has_function_privilege" in sql
+
+
 async def test_an_installed_record_function_passes(session_answering):
-    session_answering(to_regprocedure=True)
+    session_answering(to_regprocedure=[installed(True, True)])
 
     await require_dead_letters_installed(MagicMock(), "iam")
 
@@ -318,6 +404,42 @@ async def test_a_replay_carries_on_past_a_failure(session_answering):
         (FIRST, "failed"),
         (SECOND, "replayed"),
     ]
+
+
+@pytest.mark.parametrize("handler_fails", [False, True], ids=["resolve", "failed-again"])
+async def test_a_replay_carries_on_past_a_row_whose_outcome_could_not_be_written(
+    session_answering, handler_fails
+):
+    """A connection lost while the handler ran surfaces at the resolve (or
+    at the failed-again, or the commit). Escaping, it would skip the rest of
+    `--all` and print nothing for the rows already done."""
+    _, value = probe()
+    writes = iter([ConnectionError("server closed the connection"), None])
+
+    def outcome_write() -> None:
+        failure = next(writes)
+        if failure is not None:
+            raise failure
+
+    session_answering(
+        dead_letter_take=[(value,)],
+        dead_letter_resolve=outcome_write,
+        dead_letter_failed_again=outcome_write,
+    )
+    execute = AsyncMock(side_effect=[ValueError("first") if handler_fails else None, None])
+
+    outcomes = await replay_dead_letters(
+        application_running(execute), MagicMock(), "iam", [FIRST, SECOND]
+    )
+
+    assert [(outcome.id, outcome.status) for outcome in outcomes] == [
+        (FIRST, "failed"),
+        (SECOND, "replayed"),
+    ]
+    assert outcomes[0].error == (
+        "ConnectionError: server closed the connection "
+        "(outcome not recorded: the row is unchanged and still waiting)"
+    )
 
 
 # --- discard ------------------------------------------------------------------

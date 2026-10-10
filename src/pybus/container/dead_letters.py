@@ -14,8 +14,8 @@ dead letter crosses tenants -- a failed message may have no tenant, or the
 wrong one may be why it failed -- so row security has nothing to key on.
 
 Nothing here logs or prints a message's value: it may carry an invitation
-token. `describe_error` is the one place an exception becomes text, for the
-log and for the `error` column alike.
+token. `describe_error` (in `pybus.container.errors`) is the one place an
+exception becomes text, for the log and for the `error` column alike.
 """
 
 import argparse
@@ -28,13 +28,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import ValidationError
 from sqlalchemy import text
-from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from pybus.domain.events import DomainEvent
 
+# Re-exported: services may import `describe_error` from here, where it lived
+# until `transaction` needed it too.
+from .errors import describe_error, storable_name
 from .loops import plain_schema
 
 if TYPE_CHECKING:
@@ -86,40 +87,6 @@ class ReplayOutcome:
     error: str | None = None
 
 
-def _storable(text: str) -> str:
-    """Postgres `text` refuses NUL and the driver cannot encode a lone surrogate,
-    so a dead letter carrying either could never be written and the consumer
-    would stop on it for good, again after every restart."""
-    return text.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")
-
-
-def describe_error(error: BaseException) -> str:
-    """The error as it is stored and logged: its class and its message, and
-    never the input that caused it.
-
-    Two kinds quote their input in their own message, and the input here is
-    a message off the topic: a pydantic `ValidationError` names the value it
-    refused, and a SQLAlchemy `StatementError` appends the statement's
-    parameters. The first is restated from its error list without the
-    input; the second is reduced to the driver's error it wraps.
-    """
-    return _storable(_describe(error))
-
-
-def _describe(error: BaseException) -> str:
-    if isinstance(error, StatementError) and error.orig is not None:
-        return f"{type(error).__name__}: {_describe(error.orig)}"
-    if isinstance(error, ValidationError):
-        details = "; ".join(
-            f"{'.'.join(str(part) for part in detail['loc']) or '<root>'}: {detail['msg']}"
-            for detail in error.errors(
-                include_url=False, include_context=False, include_input=False
-            )
-        )
-        return f"ValidationError: {details}"
-    return f"{type(error).__name__}: {error}"
-
-
 def peek_envelope(value: bytes) -> tuple[str | None, uuid.UUID | None]:
     """`message_type` and the event id, as far as the bytes say; `None` for
     whichever they do not. For `list` and the log, which have nothing else
@@ -137,7 +104,7 @@ def peek_envelope(value: bytes) -> tuple[str | None, uuid.UUID | None]:
         event_id: uuid.UUID | None = uuid.UUID(str(data["id"]))
     except (KeyError, ValueError):
         event_id = None
-    return (_storable(message_type) if isinstance(message_type, str) else None), event_id
+    return (storable_name(message_type) if isinstance(message_type, str) else None), event_id
 
 
 async def require_dead_letters_installed(engine: AsyncEngine, schema: str) -> None:
@@ -146,18 +113,34 @@ async def require_dead_letters_installed(engine: AsyncEngine, schema: str) -> No
     Without this, a service whose migration has not run consumes normally
     until its first failure and then sits in the record back-off for good,
     with a log line every few seconds as the only sign.
+
+    Existence alone is not enough: a migration that granted EXECUTE to
+    another role than the one the server drops to passes it, and wedges
+    the same way. So the privilege is checked as the role that will call it.
     """
     schema = plain_schema(schema)
     async with AsyncSession(engine) as session:
-        installed = await session.scalar(
-            text("SELECT to_regprocedure(:signature) IS NOT NULL"),
-            {"signature": f"{schema}.{RECORD_SIGNATURE}"},
-        )
-    if not installed:
+        installed = (
+            await session.execute(
+                text(
+                    "SELECT to_regprocedure(:signature) IS NOT NULL AS present, "
+                    "has_function_privilege(to_regprocedure(:signature), 'EXECUTE') "
+                    "AS executable, current_user AS role"
+                ),
+                {"signature": f"{schema}.{RECORD_SIGNATURE}"},
+            )
+        ).first()
+    if installed is None or not installed.present:
         raise RuntimeError(
             f"{schema}.dead_letter_record does not exist: this service's dead_letters "
             "migration has not been applied. Run `alembic upgrade head` before starting "
             "the consumer."
+        )
+    if not installed.executable:
+        raise RuntimeError(
+            f"Role {installed.role} cannot execute {schema}.dead_letter_record: the "
+            "dead_letters migration granted it to some other role. Check its GRANT "
+            f"against {schema.upper()}_APP_POSTGRES_USER, the role the server runs as."
         )
 
 
@@ -223,11 +206,34 @@ async def replay_dead_letters(
 ) -> list[ReplayOutcome]:
     """Run each row's message through `application` once more, in order,
     carrying on past a failure: one row that is still broken must not keep
-    a person from the rest."""
+    a person from the rest.
+
+    That includes a failure writing a row's outcome -- a connection lost
+    while the handler ran surfaces at the resolve, the failed-again or the
+    commit. Left to escape, it skipped the rest of `--all` and printed
+    nothing for the rows already done. The row's own transaction rolled
+    back, so it is still there, unlocked, to be replayed again.
+    """
     schema = plain_schema(schema)
-    return [
-        await _replay_one(application, engine, schema, dead_letter_id) for dead_letter_id in ids
-    ]
+    outcomes: list[ReplayOutcome] = []
+    for dead_letter_id in ids:
+        try:
+            outcomes.append(await _replay_one(application, engine, schema, dead_letter_id))
+        except Exception as error:  # noqa: BLE001 -- reported to a person, see the docstring
+            described = describe_error(error)
+            logger.warning(
+                "Could not record the outcome of replaying dead letter %s: %s",
+                dead_letter_id,
+                described,
+            )
+            outcomes.append(
+                ReplayOutcome(
+                    dead_letter_id,
+                    "failed",
+                    f"{described} (outcome not recorded: the row is unchanged and still waiting)",
+                )
+            )
+    return outcomes
 
 
 async def _replay_one(
