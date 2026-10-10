@@ -84,6 +84,13 @@ class ReplayOutcome:
     error: str | None = None
 
 
+def _storable(text: str) -> str:
+    """Postgres 	ext refuses NUL and the driver cannot encode a lone surrogate,
+    so a dead letter carrying either could never be written and the consumer
+    would stop on it for good, again after every restart."""
+    return text.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")
+
+
 def describe_error(error: BaseException) -> str:
     """The error as it is stored and logged: its class and its message, and
     never the input that caused it.
@@ -94,8 +101,12 @@ def describe_error(error: BaseException) -> str:
     parameters. The first is restated from its error list without the
     input; the second is reduced to the driver's error it wraps.
     """
+    return _storable(_describe(error))
+
+
+def _describe(error: BaseException) -> str:
     if isinstance(error, StatementError) and error.orig is not None:
-        return f"{type(error).__name__}: {describe_error(error.orig)}"
+        return f"{type(error).__name__}: {_describe(error.orig)}"
     if isinstance(error, ValidationError):
         details = "; ".join(
             f"{'.'.join(str(part) for part in detail['loc']) or '<root>'}: {detail['msg']}"
@@ -124,7 +135,7 @@ def peek_envelope(value: bytes) -> tuple[str | None, uuid.UUID | None]:
         event_id: uuid.UUID | None = uuid.UUID(str(data["id"]))
     except (KeyError, ValueError):
         event_id = None
-    return (message_type if isinstance(message_type, str) else None), event_id
+    return (_storable(message_type) if isinstance(message_type, str) else None), event_id
 
 
 async def require_dead_letters_installed(engine: AsyncEngine, schema: str) -> None:

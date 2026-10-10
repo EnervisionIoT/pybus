@@ -328,3 +328,19 @@ async def test_discard_returns_only_what_was_there_to_delete(session_answering):
     session_answering(dead_letter_resolve=lambda: next(resolved))
 
     assert await discard_dead_letters(MagicMock(), "iam", [FIRST, SECOND]) == [FIRST]
+
+
+@pytest.mark.parametrize("char", ["\\u0000", "\\ud800"], ids=["nul", "lone-surrogate"])
+def test_a_message_type_is_made_storable(char):
+    message_type, _ = peek_envelope(b'{"message_type": "a' + char.encode() + b'b"}')
+
+    assert message_type is not None
+    assert "\x00" not in message_type
+    message_type.encode("utf-8")
+
+
+def test_an_error_message_is_made_storable():
+    described = describe_error(ValueError("x\x00y\ud800"))
+
+    assert "\x00" not in described
+    described.encode("utf-8")

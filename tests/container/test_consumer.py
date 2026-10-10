@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from confluent_kafka import KafkaError
 from confluent_kafka.aio import AIOConsumer
+from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from pybus.container import consumer as consumer_module
 from pybus.container.application import Application
@@ -336,6 +338,7 @@ async def test_a_message_nested_too_deep_to_read_is_a_dead_letter_at_once(table)
 
     [letter] = table.recorded
     assert (letter.attempts, letter.message_type, letter.event_id) == (1, None, None)
+    assert letter.error.startswith("RecursionError")
     consumer.commit.assert_awaited_once()
 
 
@@ -395,6 +398,51 @@ async def test_neither_the_log_nor_the_table_ever_holds_the_value(table, caplog)
     assert len(table.recorded) == 2
     assert "secret-token-XYZ" not in caplog.text
     assert all("secret-token-XYZ" not in letter.error for letter in table.recorded)
+
+
+def _validation_error_quoting_the_secret() -> Exception:
+    class Strict(BaseModel):
+        count: int
+
+    try:
+        Strict.model_validate({"count": "secret-token-XYZ"})
+    except ValidationError as error:
+        return error
+    raise AssertionError("unreachable")
+
+
+def _statement_error_quoting_the_secret() -> Exception:
+    return IntegrityError(
+        "INSERT INTO x VALUES (%(v)s)", {"v": "secret-token-XYZ"}, Exception("duplicate key")
+    )
+
+
+@pytest.mark.parametrize("via", ["cause", "context"])
+@pytest.mark.parametrize(
+    "inner",
+    [_validation_error_quoting_the_secret, _statement_error_quoting_the_secret],
+    ids=["validation-error", "statement-error"],
+)
+async def test_a_wrapped_error_does_not_bring_the_value_back_through_its_chain(caplog, inner, via):
+    """The traceback formatter prints __cause__ and __context__, so an
+    exception that wraps a ValidationError or StatementError would log the
+    input that error quotes."""
+
+    async def wrap(*_args, **_kwargs):
+        if via == "cause":
+            raise RuntimeError("wrapped") from inner()
+        try:
+            raise inner()
+        except Exception:  # noqa: BLE001 -- the point is to wrap whatever came
+            raise RuntimeError("wrapped")  # implicit __context__
+
+    stop = asyncio.Event()
+    _, msg = event_message()
+
+    with caplog.at_level("DEBUG"):
+        await consume(application_executing(wrap), kafka(msg, stop_event=stop), stop)
+
+    assert "secret-token-XYZ" not in caplog.text
 
 
 # --- a record that will not land, and shutdowns ---------------------------------
@@ -489,13 +537,16 @@ async def test_refuses_a_schema_it_would_have_to_quote(schema):
         await consume(application_executing(), consumer, stop, schema=schema)
 
     consumer.subscribe.assert_not_awaited()
+    consumer.close.assert_awaited_once()
 
 
 async def test_refuses_fewer_than_one_attempt():
     stop = asyncio.Event()
+    consumer = kafka(stop_event=stop)
 
     with pytest.raises(ValueError, match="max_attempts"):
-        await consume(application_executing(), kafka(stop_event=stop), stop, max_attempts=0)
+        await consume(application_executing(), consumer, stop, max_attempts=0)
+    consumer.close.assert_awaited_once()
 
 
 # --- run_event_consumer_for -----------------------------------------------------

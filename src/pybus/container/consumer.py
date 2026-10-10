@@ -74,16 +74,33 @@ def _backoff(schedule: Sequence[float], attempt: int) -> float:
     return schedule[min(attempt, len(schedule)) - 1]
 
 
+def _quotes_input(error: BaseException) -> bool:
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        link = pending.pop()
+        if link is None or id(link) in seen:
+            continue
+        seen.add(id(link))
+        if isinstance(link, (ValidationError, StatementError)):
+            return True
+        pending.extend((link.__cause__, link.__context__))
+    return False
+
+
 def _log_failure(message: str, *args: object, error: Exception) -> None:
-    """Log at ERROR, with the traceback unless the error quotes its input.
+    """Log at ERROR, with the traceback unless the error or anything it chains quotes its input.
 
     A pydantic ValidationError's message quotes the input it refused, and a
     SQLAlchemy StatementError's carries the statement's parameters; for a
     message being consumed, either can be an invitation token. Those two
     are logged only as `describe_error` restates them. The traceback is
-    the accepted loss.
+    the accepted loss. The whole `__cause__`/`__context__` chain is checked,
+    because the traceback formatter prints it: a handler that catches an
+    IntegrityError and raises a domain error would otherwise put the
+    parameters back into the log through the link underneath.
     """
-    exc_info = None if isinstance(error, (ValidationError, StatementError)) else error
+    exc_info = None if _quotes_input(error) else error
     logger.error(message, *args, describe_error(error), exc_info=exc_info)
 
 
@@ -213,12 +230,13 @@ async def run_event_consumer(
     build. Refuses to start when the service's dead_letters migration has
     not run, rather than discovering it at the first failure.
     """
-    if max_attempts < 1:
-        raise ValueError(f"max_attempts must be at least 1, not {max_attempts}")
-    schema = plain_schema(schema)
     stop_event = stop_event or asyncio.Event()
 
+    # Inside the try so every refusal closes the consumer the container built.
     try:
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts must be at least 1, not {max_attempts}")
+        schema = plain_schema(schema)
         await require_dead_letters_installed(engine, schema)
         await consumer.subscribe([topic])
         while not stop_event.is_set():
